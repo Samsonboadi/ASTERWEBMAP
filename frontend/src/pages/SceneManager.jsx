@@ -55,153 +55,194 @@ const SceneManager = () => {
   }, [scenes, searchQuery, statusFilter, dateFilter, activeTab]);
 
   const fetchScenes = async () => {
-    setIsLoading(true);
-    try {
-      const data = await getScenes();
-      
-      // Fetch processing status for each scene
-      const scenesWithStatus = await Promise.all(
-        data.map(async (scene) => {
-          try {
-            const status = await getProcessingStatus(scene.id);
-            return {
-              ...scene,
-              status: status.status,
-              progress: status.progress,
-              stage: status.stage
-            };
-          } catch (error) {
-            console.error(`Error fetching status for scene ${scene.id}:`, error);
-            return {
-              ...scene,
-              status: ProcessingStatus.IDLE,
-              progress: 0,
-              stage: null
-            };
-          }
-        })
-      );
-      
-      setScenes(scenesWithStatus);
-    } catch (error) {
-      toast({
-        title: "Error Loading Scenes",
-        description: error.message || "Failed to load scenes.",
-        variant: "destructive"
-      });
-      console.error("Failed to load scenes:", error);
-    } finally {
+  setIsLoading(true);
+  try {
+    console.log("Fetching scenes...");
+    const data = await getScenes();
+    console.log("Received scenes:", data);
+    
+    if (!data || data.length === 0) {
+      console.log("No scenes found or empty response");
+      setScenes([]);
+      setFilteredScenes([]);
       setIsLoading(false);
+      return;
     }
-  };
-
-  const filterScenes = () => {
-    let filtered = [...scenes];
     
-    // Filter by search query
-    if (searchQuery) {
+    // Fetch processing status for each scene
+    const scenesWithStatus = await Promise.all(
+      data.map(async (scene) => {
+        try {
+          const status = await getProcessingStatus(scene.id);
+          return {
+            ...scene,
+            status: status.status,
+            progress: status.progress,
+            stage: status.stage
+          };
+        } catch (error) {
+          console.error(`Error fetching status for scene ${scene.id}:`, error);
+          return {
+            ...scene,
+            status: ProcessingStatus.IDLE,
+            progress: 0,
+            stage: null
+          };
+        }
+      })
+    );
+    
+    console.log("Scenes with status:", scenesWithStatus);
+    setScenes(scenesWithStatus);
+    
+    // Trigger filtering immediately
+    filterScenes(scenesWithStatus);
+  } catch (error) {
+    console.error("Failed to load scenes:", error);
+    toast({
+      title: "Error Loading Scenes",
+      description: error.message || "Failed to load scenes.",
+      variant: "destructive"
+    });
+    
+    // Clear scenes on error
+    setScenes([]);
+    setFilteredScenes([]);
+  } finally {
+    setIsLoading(false);
+  }
+};
+
+
+// Updated filterScenes function that accepts scenes as parameter
+const filterScenes = (scenesToFilter = scenes) => {
+  let filtered = [...scenesToFilter];
+  
+  // Filter by search query
+  if (searchQuery) {
+    filtered = filtered.filter(scene => 
+      (scene.name && scene.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (scene.id && scene.id.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+  }
+  
+  // Filter by status
+  if (statusFilter !== 'all') {
+    filtered = filtered.filter(scene => scene.status === statusFilter);
+  }
+  
+  // Filter by active tab
+  if (activeTab !== 'all') {
+    if (activeTab === 'completed') {
+      filtered = filtered.filter(scene => scene.status === ProcessingStatus.COMPLETED);
+    } else if (activeTab === 'processing') {
+      filtered = filtered.filter(scene => scene.status === ProcessingStatus.PROCESSING);
+    } else if (activeTab === 'pending') {
       filtered = filtered.filter(scene => 
-        scene.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        scene.id.toLowerCase().includes(searchQuery.toLowerCase())
+        scene.status === ProcessingStatus.IDLE || scene.status === ProcessingStatus.QUEUED
       );
     }
+  }
+  
+  // Filter by date (only if date is valid)
+  if (dateFilter !== 'all') {
+    const now = new Date();
+    let dateLimit = new Date();
     
-    // Filter by status
-    if (statusFilter !== 'all') {
-      filtered = filtered.filter(scene => scene.status === statusFilter);
+    if (dateFilter === 'today') {
+      dateLimit.setDate(now.getDate() - 1);
+    } else if (dateFilter === 'week') {
+      dateLimit.setDate(now.getDate() - 7);
+    } else if (dateFilter === 'month') {
+      dateLimit.setMonth(now.getMonth() - 1);
+    } else if (dateFilter === 'year') {
+      dateLimit.setFullYear(now.getFullYear() - 1);
     }
     
-    // Filter by active tab
-    if (activeTab !== 'all') {
-      if (activeTab === 'completed') {
-        filtered = filtered.filter(scene => scene.status === ProcessingStatus.COMPLETED);
-      } else if (activeTab === 'processing') {
-        filtered = filtered.filter(scene => scene.status === ProcessingStatus.PROCESSING);
-      } else if (activeTab === 'pending') {
-        filtered = filtered.filter(scene => 
-          scene.status === ProcessingStatus.IDLE || scene.status === ProcessingStatus.QUEUED
-        );
-      }
-    }
-    
-    // Filter by date
-    if (dateFilter !== 'all') {
-      const now = new Date();
-      let dateLimit = new Date();
+    filtered = filtered.filter(scene => {
+      // Only filter if scene has a valid date
+      if (!scene.date || scene.date === 'Unknown') return true;
       
-      if (dateFilter === 'today') {
-        dateLimit.setDate(now.getDate() - 1);
-      } else if (dateFilter === 'week') {
-        dateLimit.setDate(now.getDate() - 7);
-      } else if (dateFilter === 'month') {
-        dateLimit.setMonth(now.getMonth() - 1);
-      } else if (dateFilter === 'year') {
-        dateLimit.setFullYear(now.getFullYear() - 1);
-      }
-      
-      filtered = filtered.filter(scene => {
+      try {
         const sceneDate = new Date(scene.date);
-        return sceneDate >= dateLimit;
-      });
-    }
-    
-    setFilteredScenes(filtered);
-  };
-
+        return !isNaN(sceneDate) && sceneDate >= dateLimit;
+      } catch (e) {
+        console.error("Invalid date format:", scene.date);
+        return true; // Include scenes with invalid dates
+      }
+    });
+  }
+  
+  console.log("Filtered scenes:", filtered);
+  setFilteredScenes(filtered);
+};
   const handleFileChange = (e) => {
     if (e.target.files && e.target.files[0]) {
       setSelectedFile(e.target.files[0]);
     }
   };
 
-  const handleUpload = async () => {
-    if (!selectedFile) {
-      toast({
-        title: "No File Selected",
-        description: "Please select an ASTER data file to upload.",
-        variant: "destructive"
-      });
-      return;
-    }
+const handleUpload = async () => {
+  if (!selectedFile) {
+    toast({
+      title: "No File Selected",
+      description: "Please select an ASTER data file to upload.",
+      variant: "destructive"
+    });
+    return;
+  }
+  
+  setIsUploading(true);
+  setUploadProgress(0);
+  
+  try {
+    // Get the returned object with promise and progressTracker
+    const upload = await uploadAsterData(selectedFile);
     
-    setIsUploading(true);
-    setUploadProgress(0);
+    // Set up the progress tracking function
+    upload.progressTracker.onUploadProgress = (progress) => {
+      setUploadProgress(progress);
+    };
     
-    try {
-      // Create a mock upload progress simulation
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          const newProgress = prev + Math.random() * 10;
-          return newProgress >= 100 ? 100 : newProgress;
-        });
-      }, 300);
-      
-      // Perform the actual upload
-      const result = await uploadAsterData(selectedFile);
-      clearInterval(progressInterval);
-      setUploadProgress(100);
-      
-      toast({
-        title: "Upload Complete",
-        description: "ASTER data has been uploaded successfully.",
-      });
-      
-      // Refresh scene list
+    // Wait for the actual upload to complete
+    const result = await upload.promise;
+    
+    // Ensure the progress bar shows 100%
+    setUploadProgress(100);
+    
+    toast({
+      title: "Upload Complete",
+      description: result.processingStarted 
+        ? "ASTER data has been uploaded and processing has started automatically."
+        : "ASTER data has been uploaded successfully. You can now start processing.",
+      variant: "success"
+    });
+    
+    // Add a delay to allow backend to set up the scene directories
+    setTimeout(() => {
+      // Refresh scenes list to show the new scene
       fetchScenes();
       
       // Reset file selection
       setSelectedFile(null);
-    } catch (error) {
-      toast({
-        title: "Upload Failed",
-        description: error.message || "An unknown error occurred during upload.",
-        variant: "destructive"
-      });
-      console.error("Upload error:", error);
-    } finally {
-      setIsUploading(false);
-    }
-  };
+      
+      // If processing was started automatically, switch to Processing tab
+      if (result.processingStarted) {
+        setActiveTab('processing');
+      }
+    }, 1500);
+    
+  } catch (error) {
+    toast({
+      title: "Upload Failed",
+      description: error.message || "An unknown error occurred during upload.",
+      variant: "destructive"
+    });
+    console.error("Upload error:", error);
+  } finally {
+    setIsUploading(false);
+  }
+};
 
   const renderStatusIcon = (status) => {
     switch (status) {
@@ -258,7 +299,7 @@ const SceneManager = () => {
           </h2>
           
           <div className="space-y-4">
-            <div className="border-2 border-dashed border-gray-300 rounded-md p-4">
+            <div className="border-2 border-dashed border-gray-300 rounded-md p-4 hover:border-indigo-300 transition-colors">
               <input
                 type="file"
                 id="aster-file"
@@ -271,18 +312,18 @@ const SceneManager = () => {
                 htmlFor="aster-file" 
                 className="flex flex-col items-center justify-center cursor-pointer"
               >
-                <Upload className="w-8 h-8 text-gray-400 mb-2" />
-                <span className="text-sm text-gray-500">
-                  {selectedFile ? selectedFile.name : "Click to select ASTER data file"}
+                <Upload className={`w-8 h-8 ${selectedFile ? 'text-indigo-500' : 'text-gray-400'} mb-2`} />
+                <span className="text-sm text-gray-700">
+                  {selectedFile ? selectedFile.name : "Click or drag to upload ASTER data file"}
                 </span>
                 <span className="text-xs text-gray-400 mt-1">
                   (.zip, .hdf, .tif formats supported)
                 </span>
               </label>
             </div>
-            
+
             {selectedFile && (
-              <div>
+              <div className="mt-4">
                 <Button 
                   onClick={handleUpload} 
                   disabled={isUploading || !selectedFile}
@@ -291,7 +332,7 @@ const SceneManager = () => {
                   {isUploading ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Uploading...
+                      Uploading... {Math.round(uploadProgress)}%
                     </>
                   ) : (
                     <>
@@ -302,7 +343,12 @@ const SceneManager = () => {
                 </Button>
                 
                 {isUploading && (
-                  <Progress value={uploadProgress} className="mt-2" />
+                  <div className="mt-2">
+                    <Progress value={uploadProgress} />
+                    <div className="text-xs text-gray-500 mt-1 text-right">
+                      {Math.round(uploadProgress)}% complete
+                    </div>
+                  </div>
                 )}
               </div>
             )}

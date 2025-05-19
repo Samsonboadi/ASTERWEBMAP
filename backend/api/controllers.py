@@ -55,6 +55,8 @@ def get_all_scenes():
     data_dir.mkdir(parents=True, exist_ok=True)
     scene_dirs = [d for d in data_dir.glob("*") if d.is_dir()]
     
+    logger.info(f"Found {len(scene_dirs)} scene directories in {data_dir}")
+    
     scenes = []
     for scene_dir in scene_dirs:
         # Try to read metadata
@@ -63,13 +65,19 @@ def get_all_scenes():
             try:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                    scenes.append({
-                        "id": scene_dir.name,
-                        "name": metadata.get("name", scene_dir.name),
-                        "date": metadata.get("acquisition_date", "Unknown"),
-                        "cloudCover": metadata.get("cloud_cover", 0),
-                        "status": _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
-                    })
+                    
+                # Get processing status
+                status = _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
+                
+                # Include scene in list
+                scenes.append({
+                    "id": scene_dir.name,
+                    "name": metadata.get("name", scene_dir.name),
+                    "date": metadata.get("acquisition_date", metadata.get("upload_date", "Unknown")),
+                    "cloudCover": metadata.get("cloud_cover", 0),
+                    "status": status
+                })
+                logger.info(f"Added scene {scene_dir.name} to list")
             except Exception as e:
                 logger.error(f"Error reading metadata for {scene_dir.name}: {str(e)}")
                 # Add with minimal information
@@ -80,8 +88,10 @@ def get_all_scenes():
                     "cloudCover": 0,
                     "status": _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
                 })
+                logger.info(f"Added scene {scene_dir.name} with minimal info due to error")
         else:
-            # Add with minimal information
+            # Add with minimal information if no metadata file
+            logger.warning(f"No metadata found for {scene_dir.name}, adding with minimal info")
             scenes.append({
                 "id": scene_dir.name,
                 "name": scene_dir.name,
@@ -90,6 +100,7 @@ def get_all_scenes():
                 "status": _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
             })
     
+    logger.info(f"Returning {len(scenes)} scenes")
     return scenes
 
 def get_scene_by_id(scene_id):
@@ -154,7 +165,7 @@ def get_scene_by_id(scene_id):
 
 def upload_scene(file, metadata=None):
     """
-    Upload a new scene file
+    Upload a new scene file and automatically start processing
     
     Parameters:
     -----------
@@ -184,18 +195,19 @@ def upload_scene(file, metadata=None):
     if metadata is None:
         metadata = {}
     
-    # Add original filename and upload date to metadata
+    # Add original filename, upload date, and file size to metadata
     metadata.update({
         "original_filename": filename,
         "upload_date": datetime.datetime.now().isoformat(),
-        "file_size": os.path.getsize(file_path)
+        "file_size": os.path.getsize(file_path),
+        "name": metadata.get("name", filename)  # Ensure name is always set
     })
     
     # Write metadata to file
     with open(scene_dir / "metadata.json", 'w') as f:
         json.dump(metadata, f, indent=2)
     
-    # Update processing status
+    # Initialize processing status
     _processing_status[scene_id] = {
         "status": ProcessingStatus.IDLE.value,
         "progress": 0,
@@ -205,11 +217,62 @@ def upload_scene(file, metadata=None):
         "end_time": None
     }
     
+    # Create processed directory for this scene to ensure it's detected
+    processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copy metadata to processed directory with default bounds
+    with open(processed_dir / "metadata.json", 'w') as f:
+        metadata.update({
+            "scene_id": scene_id,
+            "bounds": {
+                "west": -2.67,
+                "east": -1.99,
+                "south": 8.76,
+                "north": 9.43
+            },
+            "cloud_cover": 0,
+            "acquisition_date": datetime.datetime.now().strftime('%Y-%m-%d')
+        })
+        json.dump(metadata, f, indent=2)
+    
     logger.info(f"Uploaded new scene {scene_id}: {filename}")
+    
+    # Automatically start processing if it's a zip file
+    if filename.lower().endswith('.zip'):
+        logger.info(f"Automatically starting processing for scene {scene_id}")
+        try:
+            # Use a simple processing configuration focused on the available bands
+            processing_options = {
+                "extract": True,
+                "process_minerals": False,  # Disable mineral mapping which requires SWIR
+                "process_alteration": False,  # Disable alteration mapping which requires SWIR
+                "process_gold_pathfinders": False,  # Disable gold pathfinders which requires SWIR
+                "enhanced_visualization": True,  # Keep visualization on - works with VNIR only
+                "process_advanced_analysis": False,  # Disable advanced analysis which requires SWIR
+                "vnir_only_mode": True  # New option to indicate we should use VNIR-only mode
+            }
+            
+            # Start processing in a separate thread (non-blocking)
+            thread = threading.Thread(
+                target=_process_scene_worker,
+                args=(scene_id, processing_options)
+            )
+            thread.daemon = True
+            thread.start()
+            
+            # Store thread reference
+            _processing_threads[scene_id] = thread
+            
+            logger.info(f"Started processing thread for VNIR-only scene {scene_id}")
+        except Exception as e:
+            logger.error(f"Error starting processing for scene {scene_id}: {str(e)}")
     
     return {
         "sceneId": scene_id,
-        "filename": filename
+        "filename": filename,
+        "status": "success",
+        "processingStarted": filename.lower().endswith('.zip')
     }
 
 
@@ -240,34 +303,155 @@ def _process_scene_worker(scene_id, options):
         # Initialize the processor
         processor = ASTERProcessor(scene_id, Config.DATA_DIR)
         
-        # Process the scene
-        success = processor.process(options)
+        # Check if we're in VNIR-only mode
+        vnir_only_mode = options.get('vnir_only_mode', False)
         
-        if success:
-            # Update status to COMPLETED
-            _processing_status[scene_id] = {
-                "status": ProcessingStatus.COMPLETED.value,
-                "progress": 100,
-                "stage": None,
-                "error": None,
-                "start_time": _processing_status[scene_id]["start_time"],
-                "end_time": datetime.datetime.now().isoformat()
-            }
+        # Extract data
+        processor.update_status(
+            ProcessingStatus.PROCESSING, 
+            5, 
+            ProcessingStages.EXTRACT,
+            "Extracting data"
+        )
+        
+        processor.extract_data()
+        
+        # Find ASTER files - modified for VNIR-only mode if needed
+        if vnir_only_mode:
+            # Find only VNIR file and use it for both VNIR and SWIR
+            vnir_file = None
+            for file_path in processor.extracted_dir.glob('**/*.hdf'):
+                if 'vnir' in file_path.name.lower() or 'AST_09XT' in file_path.name.upper():
+                    vnir_file = file_path
+                    break
             
-            logger.info(f"Processing completed for scene {scene_id}")
+            # If no specific VNIR file found, just take the first HDF file
+            if vnir_file is None:
+                hdf_files = list(processor.extracted_dir.glob('**/*.hdf'))
+                if hdf_files:
+                    vnir_file = hdf_files[0]
+            
+            if vnir_file:
+                logger.info(f"VNIR-only mode: Using {vnir_file} for both VNIR and SWIR inputs")
+                
+                # Create a custom VNIRProcessor that doesn't require SWIR
+                from processors.vnir_processor import VNIRProcessor
+                
+                # Create a minimal SceneMetadata with dummy values for the processor
+                from processors.aster_l2_processor import SceneMetadata, GeographicBounds
+                scene_metadata = SceneMetadata(
+                    bounds=GeographicBounds(
+                        west=-2.67, east=-1.99, south=8.76, north=9.43
+                    ),
+                    solar_azimuth=152.9561090000,
+                    solar_elevation=53.5193190000,
+                    cloud_cover=5.0,
+                    acquisition_date="2000-12-18",
+                    utm_zone=30
+                )
+                
+                # Process using the VNIR-only processor
+                vnir_processor = VNIRProcessor(
+                    vnir_file=str(vnir_file),
+                    metadata=scene_metadata
+                )
+                
+                # Create RGB composites from VNIR bands
+                rgb_dir = processor.processed_dir / 'rgb_composites'
+                rgb_dir.mkdir(exist_ok=True)
+                
+                # Create a true color composite (3-2-1)
+                vnir_processor.create_true_color_composite(rgb_dir / "true_color_composite.tif")
+                
+                # Create a false color composite (NIR-Red-Green: 3-2-1)
+                vnir_processor.create_false_color_composite(rgb_dir / "false_color_composite.tif")
+                
+                # Save individual VNIR bands as GeoTIFF
+                minerals_dir = processor.processed_dir / 'minerals'
+                minerals_dir.mkdir(exist_ok=True)
+                
+                # Save each band as a separate file
+                vnir_processor.save_band_as_geotiff(1, minerals_dir / "band1_blue.tif")
+                vnir_processor.save_band_as_geotiff(2, minerals_dir / "band2_green.tif")
+                vnir_processor.save_band_as_geotiff(3, minerals_dir / "band3_nir.tif")
+                
+                # Create a NDVI map (if bands 3 and 2 are available)
+                vnir_processor.create_ndvi_map(minerals_dir / "ndvi_map.tif")
+                
+                # Copy metadata to processed directory
+                metadata_file = processor.raw_dir / 'metadata.json'
+                if metadata_file.exists():
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                    
+                    with open(processor.processed_dir / 'metadata.json', 'w') as f:
+                        json.dump({
+                            'scene_id': scene_id,
+                            'name': metadata.get('original_filename', scene_id),
+                            'date': metadata.get('upload_date', datetime.datetime.now().isoformat()),
+                            'bounds': {
+                                'west': scene_metadata.bounds.west,
+                                'east': scene_metadata.bounds.east,
+                                'south': scene_metadata.bounds.south,
+                                'north': scene_metadata.bounds.north
+                            },
+                            'cloud_cover': scene_metadata.cloud_cover,
+                            'solar_azimuth': scene_metadata.solar_azimuth,
+                            'solar_elevation': scene_metadata.solar_elevation,
+                            'acquisition_date': scene_metadata.acquisition_date,
+                            'processing_mode': 'VNIR-only'
+                        }, f, indent=2)
+                
+                # Update status to completed
+                processor.update_status(
+                    ProcessingStatus.COMPLETED, 
+                    100, 
+                    None,
+                    "VNIR-only processing completed"
+                )
+                
+                logger.info(f"VNIR-only processing completed for scene {scene_id}")
+                return True
+            else:
+                logger.error(f"No HDF files found in the extracted directory for scene {scene_id}")
+                processor.update_status(
+                    ProcessingStatus.FAILED, 
+                    0, 
+                    None,
+                    "No HDF files found in the extracted directory"
+                )
+                return False
         else:
-            # Update status to FAILED
-            _processing_status[scene_id] = {
-                "status": ProcessingStatus.FAILED.value,
-                "progress": 0,
-                "stage": None,
-                "error": "Processing failed",
-                "start_time": _processing_status[scene_id]["start_time"],
-                "end_time": datetime.datetime.now().isoformat()
-            }
+            # Continue with normal processing for scenes with both VNIR and SWIR
+            success = processor.process(options)
             
-            logger.error(f"Processing failed for scene {scene_id}")
-        
+            if success:
+                # Update status to COMPLETED
+                _processing_status[scene_id] = {
+                    "status": ProcessingStatus.COMPLETED.value,
+                    "progress": 100,
+                    "stage": None,
+                    "error": None,
+                    "start_time": _processing_status[scene_id]["start_time"],
+                    "end_time": datetime.datetime.now().isoformat()
+                }
+                
+                logger.info(f"Processing completed for scene {scene_id}")
+            else:
+                # Update status to FAILED
+                _processing_status[scene_id] = {
+                    "status": ProcessingStatus.FAILED.value,
+                    "progress": 0,
+                    "stage": None,
+                    "error": "Processing failed",
+                    "start_time": _processing_status[scene_id]["start_time"],
+                    "end_time": datetime.datetime.now().isoformat()
+                }
+                
+                logger.error(f"Processing failed for scene {scene_id}")
+            
+            return success
+                
     except Exception as e:
         logger.error(f"Error processing scene {scene_id}: {str(e)}")
         
@@ -280,6 +464,8 @@ def _process_scene_worker(scene_id, options):
             "start_time": _processing_status.get(scene_id, {}).get("start_time", None),
             "end_time": datetime.datetime.now().isoformat()
         }
+        
+        return False
 
 
 def process_scene(scene_id, options):
@@ -320,6 +506,35 @@ def process_scene(scene_id, options):
         "end_time": None
     }
     
+    # First, check for VNIR and SWIR files to determine processing mode
+    extracted_dir = raw_dir / "extracted"
+    if extracted_dir.exists():
+        # Count HDF files
+        hdf_files = list(extracted_dir.glob('**/*.hdf'))
+        logger.info(f"Found {len(hdf_files)} HDF files in {extracted_dir}")
+        
+        # Check for SWIR bands in the HDF files
+        has_swir = False
+        for hdf_file in hdf_files:
+            try:
+                with Dataset(hdf_file, 'r') as ds:
+                    available_vars = list(ds.variables.keys())
+                    if 'Band4' in available_vars or 'Band5' in available_vars:
+                        has_swir = True
+                        break
+            except Exception as e:
+                logger.error(f"Error checking HDF file {hdf_file}: {str(e)}")
+        
+        logger.info(f"SWIR bands {'found' if has_swir else 'not found'} in HDF files")
+        
+        # Set VNIR-only mode if no SWIR bands found
+        if not has_swir:
+            options['vnir_only_mode'] = True
+            logger.info("Setting VNIR-only mode due to missing SWIR bands")
+    else:
+        # No extracted files yet, can't determine SWIR availability
+        logger.info("No extracted files found, will determine processing mode after extraction")
+    
     # Convert options from frontend naming to backend naming
     processing_options = {
         "extract": True,
@@ -327,7 +542,8 @@ def process_scene(scene_id, options):
         "process_alteration": options.get("alteration", True),
         "process_gold_pathfinders": options.get("goldPathfinders", True),
         "enhanced_visualization": options.get("enhancedVisualization", True),
-        "process_advanced_analysis": options.get("advancedAnalysis", True)
+        "process_advanced_analysis": options.get("advancedAnalysis", True),
+        "vnir_only_mode": options.get("vnir_only_mode", False)
     }
     
     # Start processing in a separate thread
@@ -345,7 +561,8 @@ def process_scene(scene_id, options):
     
     return {
         "sceneId": scene_id,
-        "status": ProcessingStatus.PROCESSING.value
+        "status": ProcessingStatus.PROCESSING.value,
+        "mode": "VNIR-only" if processing_options.get("vnir_only_mode") else "Standard"
     }
 
 

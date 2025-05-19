@@ -99,8 +99,10 @@ export async function uploadAsterData(file, metadata = {}) {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const response = JSON.parse(xhr.responseText);
+            console.log("Upload successful, response:", response);
             resolve(response);
           } catch (e) {
+            console.error("Failed to parse response:", e);
             reject(new Error("Invalid JSON response from server"));
           }
         } else {
@@ -110,16 +112,19 @@ export async function uploadAsterData(file, metadata = {}) {
             errorMessage = errorData.message || errorMessage;
           } catch (e) {
             // Ignore JSON parsing errors
+            console.error("Failed to parse error response:", e);
           }
           reject(new Error(errorMessage));
         }
       });
       
       xhr.addEventListener('error', () => {
+        console.error("Network error during upload");
         reject(new Error("Network error during upload"));
       });
       
       xhr.addEventListener('abort', () => {
+        console.error("Upload was aborted");
         reject(new Error("Upload was aborted"));
       });
     });
