@@ -1,6 +1,15 @@
 # Large data files
 *.hdf
 
+
+#environment files
+.venv
+venv
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 # Processed data folders
 data/processed/
 
