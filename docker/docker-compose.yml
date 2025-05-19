@@ -1,0 +1,60 @@
+# docker-compose.yml - Improved configuration
+
+version: '3.8'
+
+services:
+  # Frontend service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/build:/usr/share/nginx/html
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - aster-network
+
+  # Backend service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - SERVER_URL=${SERVER_URL:-http://localhost}
+      - DATA_DIR=/app/data
+      - LOG_DIR=/app/logs
+      - MAX_UPLOAD_SIZE=1073741824  # 1GB in bytes
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - aster-network
+
+  # Add a simple backup service for data
+  backup:
+    image: alpine:latest
+    volumes:
+      - ./data:/data
+      - ./backups:/backups
+    command: |
+      sh -c 'while true; do
+        DATE=`date +%Y%m%d-%H%M%S`;
+        tar -czf /backups/aster-data-$$DATE.tar.gz /data;
+        find /backups -name "aster-data-*.tar.gz" -type f -mtime +7 -delete;
+        echo "Backup completed at $$DATE";
+        sleep 86400;  # Backup once per day
+      done'
+    networks:
+      - aster-network
+
+networks:
+  aster-network:
+    driver: bridge
