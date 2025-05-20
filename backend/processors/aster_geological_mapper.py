@@ -494,6 +494,26 @@ class ASTER_Geological_Mapper:
     def create_band_combination_map(self, combo_type: BandCombinations, output_dir: Path):
         """Create band combination maps and save specific minerals as GeoTIFFs with correct georeferencing."""
         
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Log at the start to see if we're getting here
+            logger.info(f"Creating band combination map for {combo_type.value}")
+            
+            # Verify metadata and bounds
+            if not hasattr(self, 'metadata') or not self.metadata:
+                logger.error(f"Missing metadata for {combo_type.value}")
+                raise ValueError(f"Missing metadata for {combo_type.value}")
+                
+            if not hasattr(self.metadata, 'bounds') or not self.metadata.bounds:
+                logger.error(f"Missing bounds in metadata for {combo_type.value}")
+                raise ValueError(f"Missing bounds in metadata for {combo_type.value}")
+                
+            # Print the existing bounds for debugging
+            if hasattr(self.metadata, 'bounds'):
+                logger.info(f"Bounds for {combo_type.value}: {self.metadata.bounds.__dict__ if hasattr(self.metadata.bounds, '__dict__') else self.metadata.bounds}")
+        
         combinations = {
             BandCombinations.LITHOLOGICAL: {
                 'bands': [4, 7, 3, 4, 2, 1],  # Ratios: 4/7, 3/4, 2/1
