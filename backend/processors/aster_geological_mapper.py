@@ -148,42 +148,43 @@ class ASTER_Geological_Mapper:
 
         # Define band combinations at class level
         self.combinations = {
-            BandCombinations.LITHOLOGICAL: {
+            # Use enum values as keys instead of enum instances
+            BandCombinations.LITHOLOGICAL.value: {
                 'bands': [(4, 7), (3, 4), (2, 1)],  # Ratios: 4/7, 3/4, 2/1
                 'description': 'Lithological boundaries RGB composite',
                 'is_ratio': True
             },
-            BandCombinations.GENERAL_ALTERATION: {
+            BandCombinations.GENERAL_ALTERATION.value: {
                 'bands': [4, 6, 8],
                 'description': 'General alteration false-color composite',
                 'is_ratio': False
             },
-            BandCombinations.IRON_OXIDE: {
+            BandCombinations.IRON_OXIDE.value: {
                 'bands': [2, 1, 3],
                 'description': 'Iron oxide mapping',
                 'is_ratio': False
             },
-            BandCombinations.ALOH_MINERALS: {
+            BandCombinations.ALOH_MINERALS.value: {
                 'bands': [4, 5, 6],
                 'description': 'Al-OH minerals mapping',
                 'is_ratio': False
             },
-            BandCombinations.MGOH_CARBONATE: {
+            BandCombinations.MGOH_CARBONATE.value: {
                 'bands': [4, 7, 9],
                 'description': 'Mg-OH and carbonate minerals mapping',
                 'is_ratio': False
             },
-            BandCombinations.CROSTA: {
+            BandCombinations.CROSTA.value: {
                 'bands': [(4, 6), (5, 7), (7, 8)],  # Ratios: 4/6, 5/7, 7/8
                 'description': 'Crosta technique composite',
                 'is_ratio': True
             },
-            BandCombinations.SULFIDE: {
+            BandCombinations.SULFIDE.value: {
                 'bands': [2, 1, 4],
                 'description': 'Sulfide minerals mapping',
                 'is_ratio': False
             },
-            BandCombinations.CHLORITE_ALTERATION: {
+            BandCombinations.CHLORITE_ALTERATION.value: {
                 'bands': [7, 8, 6],
                 'description': 'Chlorite and epidote alteration mapping',
                 'is_ratio': False
@@ -550,7 +551,7 @@ class ASTER_Geological_Mapper:
         # Print the existing bounds for debugging
         logger.info(f"Bounds for {combo_type.value}: {self.metadata.bounds.__dict__ if hasattr(self.metadata.bounds, '__dict__') else self.metadata.bounds}")
         
-        combo_info = self.combinations[combo_type]
+        combo_info = self.combinations[combo_type.value]
         output_file = output_dir / f"{combo_type.value}_composite.tif"
         
         try:

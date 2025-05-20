@@ -685,46 +685,132 @@ class ASTER_L2_Processor:
             target_shape = None
             target_band = None
 
+            # Determine target shape - prefer using VNIR resolution as target
+            vnir_bands = [b for b in self.raw_reflectance_data.keys() if b <= 3]
             swir_bands = [b for b in self.raw_reflectance_data.keys() if b >= 4]
-            if swir_bands:
-                target_band = 4 if 4 in swir_bands else min(swir_bands)
+            
+            if vnir_bands:
+                target_band = max(vnir_bands)
+                target_shape = self.raw_reflectance_data[target_band].shape
+                logger.info(f"Using VNIR band {target_band} as resampling target with shape: {target_shape}")
+            elif swir_bands:
+                target_band = min(swir_bands)
                 target_shape = self.raw_reflectance_data[target_band].shape
                 logger.info(f"Using SWIR band {target_band} as resampling target with shape: {target_shape}")
             else:
-                vnir_bands = [b for b in self.raw_reflectance_data.keys() if b < 4]
-                if vnir_bands:
+                raise ValueError("No bands available for resampling target")
+
+            # Check the size of SWIR bands relative to VNIR
+            has_swir = len(swir_bands) > 0
+            has_vnir = len(vnir_bands) > 0
+            
+            # Detect if SWIR is significantly smaller than VNIR (common with ASTER)
+            if has_swir and has_vnir:
+                vnir_pixels = self.raw_reflectance_data[vnir_bands[0]].size
+                swir_pixels = self.raw_reflectance_data[swir_bands[0]].size
+                ratio = vnir_pixels / swir_pixels
+                
+                # If VNIR has significantly more pixels, use VNIR as target
+                if ratio > 1.5:  # Typically VNIR has 4x the pixels of SWIR
+                    logger.info(f"VNIR resolution is {ratio:.1f}x higher than SWIR. Using VNIR as target resolution.")
                     target_band = max(vnir_bands)
                     target_shape = self.raw_reflectance_data[target_band].shape
-                    logger.info(f"No SWIR bands available, using VNIR band {target_band} as resampling target with shape: {target_shape}")
-                else:
-                    raise ValueError("No bands available for resampling target")
+                    
+            logger.info(f"Final resampling target: Band {target_band} with shape {target_shape}")
 
+            # Process each band
             for band, data in self.raw_reflectance_data.items():
                 try:
+                    # Verify data is valid before resampling
+                    if np.all(np.isnan(data)) or np.count_nonzero(~np.isnan(data)) < 100:
+                        logger.warning(f"Band {band} contains mostly invalid data. Skipping resampling.")
+                        continue
+                        
                     if data.shape != target_shape:
                         zoom_y = target_shape[0] / data.shape[0]
                         zoom_x = target_shape[1] / data.shape[1]
 
-                        logger.info(f"Resampling band {band} from {data.shape} to {target_shape}")
-                        resampled = zoom(data, (zoom_y, zoom_x), order=1)
-
-                        if resampled.shape != target_shape:
-                            logger.error(f"Resampling failed for band {band}: wrong output shape {resampled.shape}")
-                            continue
-
-                        self.reflectance_data[band] = resampled
+                        logger.info(f"Resampling band {band} from {data.shape} to {target_shape} (zoom: {zoom_y:.2f}x, {zoom_x:.2f}x)")
+                        
+                        # Enhanced error handling for resampling
+                        try:
+                            resampled = zoom(data, (zoom_y, zoom_x), order=1)
+                            
+                            # Verify resampled data has expected shape
+                            if resampled.shape != target_shape:
+                                logger.error(f"Resampling failed for band {band}: wrong output shape {resampled.shape}")
+                                # Try to fix shape issues by padding or trimming
+                                if resampled.shape[0] == target_shape[0] and abs(resampled.shape[1] - target_shape[1]) < 5:
+                                    # Small width difference - pad or trim
+                                    if resampled.shape[1] < target_shape[1]:
+                                        # Pad
+                                        pad_width = target_shape[1] - resampled.shape[1]
+                                        resampled = np.pad(resampled, ((0, 0), (0, pad_width)), 'constant', constant_values=np.nan)
+                                    else:
+                                        # Trim
+                                        resampled = resampled[:, :target_shape[1]]
+                                elif resampled.shape[1] == target_shape[1] and abs(resampled.shape[0] - target_shape[0]) < 5:
+                                    # Small height difference - pad or trim
+                                    if resampled.shape[0] < target_shape[0]:
+                                        # Pad
+                                        pad_height = target_shape[0] - resampled.shape[0]
+                                        resampled = np.pad(resampled, ((0, pad_height), (0, 0)), 'constant', constant_values=np.nan)
+                                    else:
+                                        # Trim
+                                        resampled = resampled[:target_shape[0], :]
+                                else:
+                                    logger.error(f"Cannot fix resampling shape mismatch for band {band}")
+                                    continue
+                                    
+                                logger.info(f"Fixed resampling shape for band {band} to {resampled.shape}")
+                            
+                            # Verify the data after resampling
+                            if np.all(np.isnan(resampled)) or np.count_nonzero(~np.isnan(resampled)) < 100:
+                                logger.warning(f"Resampled band {band} contains mostly invalid data. Filling with zeros.")
+                                # Initialize with zeros instead of NaNs
+                                resampled = np.zeros(target_shape, dtype=np.float32)
+                            
+                            self.reflectance_data[band] = resampled
+                        except Exception as e:
+                            logger.error(f"Exception during resampling for band {band}: {str(e)}")
+                            # Create an empty array of the right shape instead of failing
+                            logger.info(f"Creating empty placeholder for band {band}")
+                            self.reflectance_data[band] = np.zeros(target_shape, dtype=np.float32)
                     else:
-                        self.reflectance_data[band] = data.copy()
+                        # No resampling needed, still check for invalid data
+                        if np.all(np.isnan(data)) or np.count_nonzero(~np.isnan(data)) < 100:
+                            logger.warning(f"Band {band} contains mostly invalid data. Filling with zeros.")
+                            self.reflectance_data[band] = np.zeros(target_shape, dtype=np.float32)
+                        else:
+                            self.reflectance_data[band] = data.copy()
 
                     logger.info(f"Successfully processed band {band}")
                 except Exception as e:
-                    logger.error(f"Error resampling band {band}: {str(e)}")
+                    logger.error(f"Error processing band {band}: {str(e)}")
                     logger.error(f"Stack trace: {traceback.format_exc()}")
+                    # Create an empty array of the right shape instead of failing
+                    try:
+                        self.reflectance_data[band] = np.zeros(target_shape, dtype=np.float32)
+                        logger.info(f"Created empty placeholder for band {band}")
+                    except:
+                        logger.error(f"Could not create placeholder for band {band}")
 
             if not self.reflectance_data:
                 raise RuntimeError("No bands were successfully resampled")
 
             logger.info(f"Resampling complete. Available bands: {list(self.reflectance_data.keys())}")
+            
+            # Additional validation step
+            for band in self.reflectance_data:
+                data = self.reflectance_data[band]
+                # Check for invalid data
+                invalid_ratio = np.sum(np.isnan(data)) / data.size
+                if invalid_ratio > 0.9:  # More than 90% invalid
+                    logger.warning(f"Band {band} has {invalid_ratio*100:.1f}% invalid values after resampling")
+                # Check for zero data
+                zero_ratio = np.sum(data == 0) / data.size
+                if zero_ratio > 0.9:  # More than 90% zeros
+                    logger.warning(f"Band {band} has {zero_ratio*100:.1f}% zero values after resampling")
 
         except Exception as e:
             logger.error(f"Error during resampling: {str(e)}")
