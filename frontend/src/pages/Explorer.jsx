@@ -26,11 +26,13 @@ const Explorer = () => {
   const [rightSidebarExpanded, setRightSidebarExpanded] = useState(true);
   const [activeLeftTab, setActiveLeftTab] = useState('process'); // 'process' or 'layers'
   const [isLoading, setIsLoading] = useState(true);
-
+  const [isVnirOnly, setIsVnirOnly] = useState(false);
   // Fetch scenes on component mount
   useEffect(() => {
-    fetchScenes();
-  }, []);
+    if (sceneDetails) {
+      setIsVnirOnly(sceneDetails.processingMode === 'VNIR-only');
+    }
+  }, [sceneDetails]);
 
   // Fetch scene details when a scene is selected
   useEffect(() => {
@@ -200,21 +202,47 @@ const Explorer = () => {
                       <h3 className="text-sm font-medium text-gray-700">Available Layers</h3>
                       
                       {/* Alteration Layer Selection */}
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">
+                        Alteration Indices
+                        {isVnirOnly && (
+                          <span className="ml-2 text-xs text-blue-500">
+                            (Not available in VNIR-only mode)
+                          </span>
+                        )}
+                      </label>
+                      <select 
+                        value={selectedLayers.alteration}
+                        onChange={(e) => handleLayerChange('alteration', e.target.value)}
+                        className="w-full p-2 border border-gray-300 rounded-md text-sm"
+                        disabled={isVnirOnly}
+                      >
+                        <option value="">None</option>
+                        {availableLayers.alteration?.map(layer => (
+                          <option key={layer} value={layer}>
+                            {layer.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Add a special NDVI layer option for VNIR-only mode */}
+                    {isVnirOnly && (
                       <div>
-                        <label className="block text-xs text-gray-500 mb-1">Alteration Indices</label>
+                        <label className="block text-xs text-gray-500 mb-1">VNIR Indices</label>
                         <select 
-                          value={selectedLayers.alteration}
-                          onChange={(e) => handleLayerChange('alteration', e.target.value)}
+                          value={selectedLayers.vnir || ''}
+                          onChange={(e) => handleLayerChange('vnir', e.target.value)}
                           className="w-full p-2 border border-gray-300 rounded-md text-sm"
                         >
                           <option value="">None</option>
-                          {availableLayers.alteration?.map(layer => (
-                            <option key={layer} value={layer}>
-                              {layer.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                            </option>
-                          ))}
+                          <option value="ndvi">NDVI (Vegetation Index)</option>
+                          <option value="band1">Band 1 (Blue)</option>
+                          <option value="band2">Band 2 (Red)</option>
+                          <option value="band3">Band 3 (NIR)</option>
                         </select>
                       </div>
+                    )}
                       
                       {/* Geological Layer Selection */}
                       <div>

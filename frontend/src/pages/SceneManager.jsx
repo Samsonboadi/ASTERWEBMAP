@@ -506,6 +506,15 @@ const handleUpload = async () => {
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm font-medium text-gray-900">{scene.name}</div>
                       <div className="text-xs text-gray-500">{scene.id}</div>
+                      {scene.processingMode === 'VNIR-only' && (
+                        <span className="inline-flex items-center px-2 py-0.5 mt-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                          VNIR Only
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm font-medium text-gray-900">{scene.name}</div>
+                      <div className="text-xs text-gray-500">{scene.id}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
