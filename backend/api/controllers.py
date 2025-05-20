@@ -250,7 +250,7 @@ def upload_scene(file, metadata=None):
                 "process_gold_pathfinders": False,  # Disable gold pathfinders which requires SWIR
                 "enhanced_visualization": True,  # Keep visualization on - works with VNIR only
                 "process_advanced_analysis": False,  # Disable advanced analysis which requires SWIR
-                "vnir_only_mode": True  # New option to indicate we should use VNIR-only mode
+                "vnir_only_mode": False  # New option to indicate we should use VNIR-only mode
             }
             
             # Start processing in a separate thread (non-blocking)
@@ -494,7 +494,14 @@ def process_scene(scene_id, options):
     current_status = status_info.get("status", ProcessingStatus.IDLE.value)
     
     if current_status == ProcessingStatus.PROCESSING.value:
-        raise Exception(f"Scene {scene_id} is already being processed")
+        # Instead of throwing an error, allow reprocessing by killing the previous process
+        logger.warning(f"Scene {scene_id} is already being processed. Stopping current process and restarting.")
+        
+        # If there's a thread reference, try to terminate it (this is often not possible in Python)
+        # but we can at least remove the reference
+        if scene_id in _processing_threads:
+            logger.info(f"Removing reference to previous processing thread for {scene_id}")
+            _processing_threads.pop(scene_id, None)
     
     # Set initial processing status
     _processing_status[scene_id] = {
@@ -505,35 +512,6 @@ def process_scene(scene_id, options):
         "start_time": datetime.datetime.now().isoformat(),
         "end_time": None
     }
-    
-    # First, check for VNIR and SWIR files to determine processing mode
-    extracted_dir = raw_dir / "extracted"
-    if extracted_dir.exists():
-        # Count HDF files
-        hdf_files = list(extracted_dir.glob('**/*.hdf'))
-        logger.info(f"Found {len(hdf_files)} HDF files in {extracted_dir}")
-        
-        # Check for SWIR bands in the HDF files
-        has_swir = False
-        for hdf_file in hdf_files:
-            try:
-                with Dataset(hdf_file, 'r') as ds:
-                    available_vars = list(ds.variables.keys())
-                    if 'Band4' in available_vars or 'Band5' in available_vars:
-                        has_swir = True
-                        break
-            except Exception as e:
-                logger.error(f"Error checking HDF file {hdf_file}: {str(e)}")
-        
-        logger.info(f"SWIR bands {'found' if has_swir else 'not found'} in HDF files")
-        
-        # Set VNIR-only mode if no SWIR bands found
-        if not has_swir:
-            options['vnir_only_mode'] = True
-            logger.info("Setting VNIR-only mode due to missing SWIR bands")
-    else:
-        # No extracted files yet, can't determine SWIR availability
-        logger.info("No extracted files found, will determine processing mode after extraction")
     
     # Convert options from frontend naming to backend naming
     processing_options = {
@@ -564,7 +542,6 @@ def process_scene(scene_id, options):
         "status": ProcessingStatus.PROCESSING.value,
         "mode": "VNIR-only" if processing_options.get("vnir_only_mode") else "Standard"
     }
-
 
 def get_processing_status(scene_id):
     """

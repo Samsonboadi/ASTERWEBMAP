@@ -246,7 +246,7 @@ class ASTER_L2_Processor:
             raise RuntimeError("No data was successfully resampled")
         
         # Initialize mineral indices
-        self.initialize_mineral_indices()
+        #self.initialize_mineral_indices()
         
         # Apply cloud mask if cloud coverage > 0
         if self.metadata and self.metadata.cloud_cover > 0:
