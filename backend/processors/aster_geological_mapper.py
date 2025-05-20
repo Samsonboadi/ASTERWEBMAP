@@ -13,6 +13,7 @@ from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from skimage import feature, filters, morphology, segmentation, draw
 from .aster_l2_processor import ASTER_L2_Processor, MineralIndices
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -61,7 +62,6 @@ class BandRatioMaps(Enum):
     ALOH_CONTENT = "aloh_content"
     MGOH_CONTENT = "mgoh_content"
 
-
 class ASTER_Geological_Mapper:
     def __init__(self, base_processor):
         """
@@ -109,34 +109,34 @@ class ASTER_Geological_Mapper:
                 'band_combinations': [(7, 6), (9, 8), (5, 6)]
             },
             AlterationIndices.SULFIDE_ALTERATION: {
-            'ratios': [(2, 1), (3, 4), (5, 6)],
-            'threshold': 0.45,
-            'description': 'Sulfide alteration assemblage',
-            'band_combinations': [(2, 1), (3, 4), (5, 6)]
-             },
+                'ratios': [(2, 1), (3, 4), (5, 6)],
+                'threshold': 0.45,
+                'description': 'Sulfide alteration assemblage',
+                'band_combinations': [(2, 1), (3, 4), (5, 6)]
+            },
             AlterationIndices.CHLORITE_EPIDOTE: {
-            'ratios': [(7, 8), (6, 9), (5, 6)],
-            'threshold': 0.50,
-            'description': 'Chlorite-epidote alteration',
-            'band_combinations': [(7, 8), (6, 9), (5, 6)]
+                'ratios': [(7, 8), (6, 9), (5, 6)],
+                'threshold': 0.50,
+                'description': 'Chlorite-epidote alteration',
+                'band_combinations': [(7, 8), (6, 9), (5, 6)]
             },
             AlterationIndices.SERICITE_PYRITE: {
-            'ratios': [(4, 6), (5, 6), (2, 1)],
-            'threshold': 0.50,
-            'description': 'Sericite-pyrite alteration',
-            'band_combinations': [(4, 6), (5, 6), (2, 1)]
+                'ratios': [(4, 6), (5, 6), (2, 1)],
+                'threshold': 0.50,
+                'description': 'Sericite-pyrite alteration',
+                'band_combinations': [(4, 6), (5, 6), (2, 1)]
             },
             AlterationIndices.CARBONATE_ALTERATION: {
-            'ratios': [(8, 9), (6, 8), (7, 9)],
-            'threshold': 0.50,
-            'description': 'Carbonate alteration',
-            'band_combinations': [(8, 9), (6, 8), (7, 9)]
+                'ratios': [(8, 9), (6, 8), (7, 9)],
+                'threshold': 0.50,
+                'description': 'Carbonate alteration',
+                'band_combinations': [(8, 9), (6, 8), (7, 9)]
             },
             AlterationIndices.IRON_ALTERATION: {
-            'ratios': [(2, 1), (3, 2)],
-            'threshold': 0.45,
-            'description': 'Iron alteration/oxidation',
-            'band_combinations': [(2, 1), (3, 2), (4, 2)]
+                'ratios': [(2, 1), (3, 2)],
+                'threshold': 0.45,
+                'description': 'Iron alteration/oxidation',
+                'band_combinations': [(2, 1), (3, 2), (4, 2)]
             },
             AlterationIndices.GOSSAN: {
                 'ratios': [(2, 1), (3, 4), (2, 3)],
@@ -146,85 +146,119 @@ class ASTER_Geological_Mapper:
             }
         }
 
-
-
+        # Define band combinations at class level
+        self.combinations = {
+            BandCombinations.LITHOLOGICAL: {
+                'bands': [(4, 7), (3, 4), (2, 1)],  # Ratios: 4/7, 3/4, 2/1
+                'description': 'Lithological boundaries RGB composite',
+                'is_ratio': True
+            },
+            BandCombinations.GENERAL_ALTERATION: {
+                'bands': [4, 6, 8],
+                'description': 'General alteration false-color composite',
+                'is_ratio': False
+            },
+            BandCombinations.IRON_OXIDE: {
+                'bands': [2, 1, 3],
+                'description': 'Iron oxide mapping',
+                'is_ratio': False
+            },
+            BandCombinations.ALOH_MINERALS: {
+                'bands': [4, 5, 6],
+                'description': 'Al-OH minerals mapping',
+                'is_ratio': False
+            },
+            BandCombinations.MGOH_CARBONATE: {
+                'bands': [4, 7, 9],
+                'description': 'Mg-OH and carbonate minerals mapping',
+                'is_ratio': False
+            },
+            BandCombinations.CROSTA: {
+                'bands': [(4, 6), (5, 7), (7, 8)],  # Ratios: 4/6, 5/7, 7/8
+                'description': 'Crosta technique composite',
+                'is_ratio': True
+            },
+            BandCombinations.SULFIDE: {
+                'bands': [2, 1, 4],
+                'description': 'Sulfide minerals mapping',
+                'is_ratio': False
+            },
+            BandCombinations.CHLORITE_ALTERATION: {
+                'bands': [7, 8, 6],
+                'description': 'Chlorite and epidote alteration mapping',
+                'is_ratio': False
+            }
+        }
 
     def save_alteration_map(self, alteration_type: AlterationIndices, output_dir: Path):
-            """Save alteration map to file"""
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
+        """Save alteration map to file"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Calculate alteration index
+        index_map, confidence_map = self.calculate_alteration_index(alteration_type)
+        
+        # Prepare transform and CRS
+        if self.processor.metadata and self.processor.metadata.bounds:
+            bounds = self.processor.metadata.bounds
+            transform = from_bounds(
+                bounds.west, bounds.south,
+                bounds.east, bounds.north,
+                index_map.shape[1], index_map.shape[0]
+            )
+            utm_zone = self.processor.metadata.utm_zone if self.processor.metadata.utm_zone else int((bounds.east + bounds.west) / 12) + 31
+            crs = CRS.from_dict({'proj': 'utm', 'zone': utm_zone, 'datum': 'WGS84'})
+        else:
+            transform = from_bounds(0, 0, index_map.shape[1], index_map.shape[0],
+                                index_map.shape[1], index_map.shape[0])
+            crs = CRS.from_epsg(4326)
+        
+        # Save as GeoTIFF
+        output_file = output_dir / f"{alteration_type.value}_map.tif"
+        
+        with rasterio.open(
+            output_file,
+            'w',
+            driver='GTiff',
+            height=index_map.shape[0],
+            width=index_map.shape[1],
+            count=2,
+            dtype=index_map.dtype,
+            crs=crs,
+            transform=transform,
+            nodata=np.nan
+        ) as dst:
+            dst.write(index_map, 1)
+            dst.write(confidence_map, 2)
+            dst.set_band_description(1, f"{alteration_type.value} index")
+            dst.set_band_description(2, "Confidence map")
             
-            # Calculate alteration index
-            index_map, confidence_map = self.calculate_alteration_index(alteration_type)
-            
-            # Prepare transform and CRS
-            if self.processor.metadata and self.processor.metadata.bounds:
-                bounds = self.processor.metadata.bounds
-                transform = from_bounds(
-                    bounds.west, bounds.south,
-                    bounds.east, bounds.north,
-                    index_map.shape[1], index_map.shape[0]
+            if self.processor.metadata:
+                dst.update_tags(
+                    acquisition_date=self.processor.metadata.acquisition_date,
+                    solar_azimuth=str(self.processor.metadata.solar_azimuth),
+                    solar_elevation=str(self.processor.metadata.solar_elevation),
+                    cloud_cover=str(self.processor.metadata.cloud_cover)
                 )
-                
-                # Determine UTM zone if not provided
-                if not self.processor.metadata.utm_zone:
-                    center_lon = (bounds.east + bounds.west) / 2
-                    utm_zone = int((center_lon + 180) / 6) + 1
-                else:
-                    utm_zone = self.processor.metadata.utm_zone
-                    
-                crs = CRS.from_dict({'proj': 'utm', 'zone': utm_zone, 'datum': 'WGS84'})
-            else:
-                transform = from_bounds(0, 0, index_map.shape[1], index_map.shape[0],
-                                    index_map.shape[1], index_map.shape[0])
-                crs = CRS.from_epsg(4326)
-            
-            # Save as GeoTIFF
-            output_file = output_dir / f"{alteration_type.value}_map.tif"
-            
-            with rasterio.open(
-                output_file,
-                'w',
-                driver='GTiff',
-                height=index_map.shape[0],
-                width=index_map.shape[1],
-                count=2,
-                dtype=index_map.dtype,
-                crs=crs,
-                transform=transform,
-                nodata=np.nan
-            ) as dst:
-                dst.write(index_map, 1)
-                dst.write(confidence_map, 2)
-                dst.set_band_description(1, f"{alteration_type.value} index")
-                dst.set_band_description(2, "Confidence map")
-                
-                if self.processor.metadata:
-                    dst.update_tags(
-                        acquisition_date=self.processor.metadata.acquisition_date,
-                        solar_azimuth=str(self.processor.metadata.solar_azimuth),
-                        solar_elevation=str(self.processor.metadata.solar_elevation),
-                        cloud_cover=str(self.processor.metadata.cloud_cover)
-                    )
-            
-            # Create visualization
-            plt.figure(figsize=(12, 6))
-            
-            plt.subplot(121)
-            plt.imshow(index_map, cmap='viridis')
-            plt.colorbar(label='Index Value')
-            plt.title(f"{alteration_type.value} Distribution")
-            
-            plt.subplot(122)
-            plt.imshow(confidence_map, cmap='RdYlGn')
-            plt.colorbar(label='Confidence')
-            plt.title('Confidence Map')
-            
-            plt.tight_layout()
-            plt.savefig(output_dir / f"{alteration_type.value}_visualization.png", dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            logger.info(f"Saved {alteration_type.value} map to {output_file}")
+        
+        # Create visualization
+        plt.figure(figsize=(12, 6))
+        
+        plt.subplot(121)
+        plt.imshow(index_map, cmap='viridis')
+        plt.colorbar(label='Index Value')
+        plt.title(f"{alteration_type.value} Distribution")
+        
+        plt.subplot(122)
+        plt.imshow(confidence_map, cmap='RdYlGn')
+        plt.colorbar(label='Confidence')
+        plt.title('Confidence Map')
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{alteration_type.value}_visualization.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"Saved {alteration_type.value} map to {output_file}")
 
     def calculate_alteration_index(self, alteration_type: AlterationIndices,
                                  enhanced_processing: bool = True) -> Tuple[np.ndarray, np.ndarray]:
@@ -263,6 +297,11 @@ class ASTER_Geological_Mapper:
                 
             b1 = self.reflectance_data[band1]
             b2 = self.reflectance_data[band2]
+            
+            # Check for invalid data
+            if b1 is None or b2 is None or not np.any(b1) or not np.any(b2) or np.all(np.isnan(b1)) or np.all(np.isnan(b2)):
+                logger.warning(f"Invalid data in bands {band1} or {band2}")
+                return np.zeros_like(b1), np.zeros_like(b1)
             
             # Calculate ratio where both bands have valid data
             valid_mask = (b1 > 0) & (b2 > 0) & ~np.isnan(b1) & ~np.isnan(b2)
@@ -376,7 +415,6 @@ class ASTER_Geological_Mapper:
             raise ValueError(f"Unsupported feature type: {feature_type}")
             
         return result.astype(np.float32)
-
 
     def create_composite_map(self, output_dir: Path):
         """Create enhanced composite geological map combining multiple features"""
@@ -497,94 +535,52 @@ class ASTER_Geological_Mapper:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        try:
-            # Log at the start to see if we're getting here
-            logger.info(f"Creating band combination map for {combo_type.value}")
-            
-            # Verify metadata and bounds
-            if not hasattr(self, 'metadata') or not self.metadata:
-                logger.error(f"Missing metadata for {combo_type.value}")
-                raise ValueError(f"Missing metadata for {combo_type.value}")
-                
-            if not hasattr(self.metadata, 'bounds') or not self.metadata.bounds:
-                logger.error(f"Missing bounds in metadata for {combo_type.value}")
-                raise ValueError(f"Missing bounds in metadata for {combo_type.value}")
-                
-            # Print the existing bounds for debugging
-            if hasattr(self.metadata, 'bounds'):
-                logger.info(f"Bounds for {combo_type.value}: {self.metadata.bounds.__dict__ if hasattr(self.metadata.bounds, '__dict__') else self.metadata.bounds}")
+        # Log at the start to see if we're getting here
+        logger.info(f"Creating band combination map for {combo_type.value}")
         
-        combinations = {
-            BandCombinations.LITHOLOGICAL: {
-                'bands': [4, 7, 3, 4, 2, 1],  # Ratios: 4/7, 3/4, 2/1
-                'description': 'Lithological boundaries RGB composite',
-                'is_ratio': True
-            },
-            BandCombinations.GENERAL_ALTERATION: {
-                'bands': [4, 6, 8],
-                'description': 'General alteration false-color composite',
-                'is_ratio': False
-            },
-            BandCombinations.IRON_OXIDE: {
-                'bands': [2, 1, 3],
-                'description': 'Iron oxide mapping',
-                'is_ratio': False
-            },
-            BandCombinations.ALOH_MINERALS: {
-                'bands': [4, 5, 6],
-                'description': 'Al-OH minerals mapping',
-                'is_ratio': False
-            },
-            BandCombinations.MGOH_CARBONATE: {
-                'bands': [4, 7, 9],
-                'description': 'Mg-OH and carbonate minerals mapping',
-                'is_ratio': False
-            },
-            BandCombinations.CROSTA: {
-                'bands': [4, 6, 5, 7, 7, 8],  # Ratios: 4/6, 5/7, 7/8
-                'description': 'Crosta technique composite',
-                'is_ratio': True
-            },
-            BandCombinations.SULFIDE: {
-            'bands': [2, 1, 4],
-            'description': 'Sulfide minerals mapping',
-            'is_ratio': False
-            },
-            BandCombinations.CHLORITE_ALTERATION: {
-            'bands': [7, 8, 6],
-            'description': 'Chlorite and epidote alteration mapping',
-            'is_ratio': False
-            }
-        }
-
-        combo_info = combinations[combo_type]
+        # Verify metadata and bounds
+        if not hasattr(self, 'metadata') or not self.metadata:
+            logger.error(f"Missing metadata for {combo_type.value}")
+            raise ValueError(f"Missing metadata for {combo_type.value}")
+            
+        if not hasattr(self.metadata, 'bounds') or not self.metadata.bounds:
+            logger.error(f"Missing bounds in metadata for {combo_type.value}")
+            raise ValueError(f"Missing bounds in metadata for {combo_type.value}")
+            
+        # Print the existing bounds for debugging
+        logger.info(f"Bounds for {combo_type.value}: {self.metadata.bounds.__dict__ if hasattr(self.metadata.bounds, '__dict__') else self.metadata.bounds}")
+        
+        combo_info = self.combinations[combo_type]
         output_file = output_dir / f"{combo_type.value}_composite.tif"
         
         try:
             # Prepare transform and CRS
-            if self.metadata and hasattr(self.metadata, 'bounds'):
-                bounds = self.metadata.bounds
-                crs = CRS.from_epsg(4326)
-            else:
-                logger.warning(f"No metadata bounds available for {combo_type.value}. Using fallback.")
-                bounds = None
-                crs = CRS.from_epsg(4326)
-
+            bounds = self.metadata.bounds
+            crs = CRS.from_epsg(4326)
+            
             rgb = np.zeros((self.reflectance_data[4].shape[0], 
-                            self.reflectance_data[4].shape[1], 3), dtype=np.float32)
+                          self.reflectance_data[4].shape[1], 3), dtype=np.float32)
             nodata = -9999
             
             if combo_info['is_ratio']:
-                for i in range(3):
-                    num_idx = i * 2
-                    den_idx = i * 2 + 1
-                    num_band = combo_info['bands'][num_idx]
-                    den_band = combo_info['bands'][den_idx]
+                # Handle ratio-based combinations (e.g., LITHOLOGICAL, CROSTA)
+                ratio_pairs = combo_info['bands']  # List of (num, den) tuples
+                if len(ratio_pairs) != 3:
+                    raise ValueError(f"Expected 3 ratio pairs for {combo_type.value}, got {len(ratio_pairs)}")
+                
+                for i, (num_band, den_band) in enumerate(ratio_pairs):
+                    if num_band not in self.reflectance_data or den_band not in self.reflectance_data:
+                        logger.warning(f"Missing band data for {num_band} or {den_band}")
+                        return
                     
-                    numerator = self.processor.reflectance_data[num_band]
-                    denominator = self.processor.reflectance_data[den_band]
+                    numerator = self.reflectance_data[num_band]
+                    denominator = self.reflectance_data[den_band]
                     
-                    valid_mask = (numerator > 0) & (denominator > 0)
+                    valid_mask = (numerator > 0) & (denominator > 0) & ~np.isnan(numerator) & ~np.isnan(denominator)
+                    if not np.any(valid_mask):
+                        logger.warning(f"Invalid data in bands {num_band} or {den_band} for {combo_type.value}")
+                        return
+                    
                     ratio = np.zeros_like(numerator, dtype=np.float32)
                     ratio[valid_mask] = numerator[valid_mask] / denominator[valid_mask]
                     
@@ -594,10 +590,22 @@ class ASTER_Geological_Mapper:
                     
                     rgb[:, :, i] = ratio
             else:
-                for i, band in enumerate(combo_info['bands']):
-                    band_data = self.processor.reflectance_data[band]
+                # Handle direct band combinations (e.g., GENERAL_ALTERATION, IRON_OXIDE)
+                bands = combo_info['bands']
+                if len(bands) != 3:
+                    raise ValueError(f"Expected 3 bands for {combo_type.value}, got {len(bands)}")
+                
+                for i, band in enumerate(bands):
+                    if band not in self.reflectance_data:
+                        logger.warning(f"Missing band data for {band}")
+                        return
                     
+                    band_data = self.reflectance_data[band]
                     valid_mask = ~np.isnan(band_data)
+                    if not np.any(valid_mask):
+                        logger.warning(f"Invalid data in band {band} for {combo_type.value}")
+                        return
+                    
                     if np.any(valid_mask):
                         p2, p98 = np.percentile(band_data[valid_mask], [2, 98])
                         band_data = np.clip((band_data - p2) / (p98 - p2), 0, 1)
@@ -612,7 +620,7 @@ class ASTER_Geological_Mapper:
                         bounds.west, bounds.south,
                         bounds.east, bounds.north,
                         iron_data.shape[1], iron_data.shape[0]
-                    ) if bounds else from_bounds(0, 0, iron_data.shape[1], iron_data.shape[0], iron_data.shape[1], iron_data.shape[0])
+                    )
                     
                     with rasterio.open(
                         iron_file,
@@ -643,7 +651,7 @@ class ASTER_Geological_Mapper:
                         bounds.west, bounds.south,
                         bounds.east, bounds.north,
                         mgoh_data.shape[1], mgoh_data.shape[0]
-                    ) if bounds else from_bounds(0, 0, mgoh_data.shape[1], mgoh_data.shape[0], mgoh_data.shape[1], mgoh_data.shape[0])
+                    )
                     
                     with rasterio.open(
                         mgoh_file,
@@ -672,7 +680,7 @@ class ASTER_Geological_Mapper:
                 bounds.west, bounds.south,
                 bounds.east, bounds.north,
                 rgb.shape[1], rgb.shape[0]
-            ) if bounds else from_bounds(0, 0, rgb.shape[1], rgb.shape[0], rgb.shape[1], rgb.shape[0])
+            )
             
             with rasterio.open(
                 output_file,
@@ -704,9 +712,6 @@ class ASTER_Geological_Mapper:
             logger.error(f"Error creating {combo_type.value} composite and individual maps: {str(e)}")
             raise
 
-
-
-
     def create_enhanced_sulfide_map(self, output_dir: Path, threshold: float = 0.65):
         """
         Create an enhanced sulfide alteration map by combining multiple indicators
@@ -728,7 +733,7 @@ class ASTER_Geological_Mapper:
         
         # Get sulfide-related mineral indices from processor
         for mineral in [MineralIndices.PYRITE, MineralIndices.CHALCOPYRITE, 
-                    MineralIndices.IRON_OXIDE, MineralIndices.FERROUS_IRON]:
+                       MineralIndices.IRON_OXIDE, MineralIndices.FERROUS_IRON]:
             try:
                 index_map, confidence = self.processor.calculate_mineral_index(mineral)
                 indicators[f"{mineral.value}"] = index_map * confidence
@@ -738,8 +743,8 @@ class ASTER_Geological_Mapper:
         
         # Get alteration indices
         for alteration in [AlterationIndices.SULFIDE_ALTERATION, 
-                        AlterationIndices.SERICITE_PYRITE,
-                        AlterationIndices.GOSSAN]:
+                          AlterationIndices.SERICITE_PYRITE,
+                          AlterationIndices.GOSSAN]:
             try:
                 index_map, confidence = self.calculate_alteration_index(alteration)
                 indicators[f"{alteration.value}"] = index_map * confidence
@@ -791,7 +796,6 @@ class ASTER_Geological_Mapper:
                 data_2d = data[valid_mask].reshape(-1, len(indicator_stack))
                 
                 # Run PCA
-                from sklearn.decomposition import PCA
                 pca = PCA(n_components=1)
                 transformed = pca.fit_transform(data_2d)
                 
@@ -808,7 +812,6 @@ class ASTER_Geological_Mapper:
             sulfide_mask = sulfide_map > threshold
             
             # Apply spatial filtering to remove noise
-            from scipy import ndimage
             sulfide_mask = ndimage.binary_opening(sulfide_mask, structure=np.ones((3, 3)))
             sulfide_mask = ndimage.binary_closing(sulfide_mask, structure=np.ones((3, 3)))
             
@@ -836,7 +839,7 @@ class ASTER_Geological_Mapper:
             else:
                 logger.warning("No metadata bounds available. Using fallback.")
                 transform = from_bounds(0, 0, sulfide_map.shape[1], sulfide_map.shape[0],
-                                        sulfide_map.shape[1], sulfide_map.shape[0])
+                                      sulfide_map.shape[1], sulfide_map.shape[0])
                 crs = CRS.from_epsg(4326)
             
             # Handle NaN values
@@ -894,10 +897,6 @@ class ASTER_Geological_Mapper:
             logger.error(f"Error creating enhanced sulfide map: {str(e)}")
             logger.error("Stack trace:", exc_info=True)
             raise
-
-
-
-
 
     def generate_alteration_minerals_report(self, output_dir: Path):
         """
@@ -1369,8 +1368,6 @@ class ASTER_Geological_Mapper:
         
         return report_file
 
-
-
     def generate_alteration_report(self, output_dir: Path):
         """Generate comprehensive alteration mapping report"""
         output_dir = Path(output_dir)
@@ -1489,64 +1486,6 @@ class ASTER_Geological_Mapper:
         
         logger.info(f"Generated alteration report at {report_file}")
         return report_file
-    
-    def save_alteration_map(self, alteration_type: AlterationIndices, output_dir: Path):
-        """Save alteration map as GeoTIFF with correct georeferencing matching composite maps."""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Calculate alteration index
-        index_map, confidence_map = self.calculate_alteration_index(alteration_type)
-        
-        # Prepare transform and CRS to match create_band_combination_map
-        if self.metadata and hasattr(self.metadata, 'bounds'):
-            bounds = self.metadata.bounds
-            transform = from_bounds(
-                bounds.west, bounds.south,
-                bounds.east, bounds.north,
-                index_map.shape[1], index_map.shape[0]
-            )
-            crs = CRS.from_epsg(4326)  # Match composite maps' CRS
-        else:
-            logger.warning(f"No metadata bounds available for {alteration_type.value}. Using fallback.")
-            transform = from_bounds(0, 0, index_map.shape[1], index_map.shape[0],
-                                    index_map.shape[1], index_map.shape[0])
-            crs = CRS.from_epsg(4326)
-        
-        # Save as GeoTIFF
-        output_file = output_dir / f"{alteration_type.value}_map.tif"
-        nodata = -9999
-        index_map = np.nan_to_num(index_map, nan=nodata)
-        confidence_map = np.nan_to_num(confidence_map, nan=nodata)
-        
-        with rasterio.open(
-            output_file,
-            'w',
-            driver='GTiff',
-            height=index_map.shape[0],
-            width=index_map.shape[1],
-            count=2,
-            dtype=rasterio.float32,
-            crs=crs,
-            transform=transform,
-            nodata=nodata,
-            compress='LZW'
-        ) as dst:
-            dst.write(index_map.astype(rasterio.float32), 1)
-            dst.write(confidence_map.astype(rasterio.float32), 2)
-            dst.set_band_description(1, f"{alteration_type.value} Index")
-            dst.set_band_description(2, "Confidence map")
-            
-            if self.metadata:
-                dst.update_tags(
-                    acquisition_date=self.metadata.acquisition_date,
-                    solar_azimuth=str(self.metadata.solar_azimuth),
-                    solar_elevation=str(self.metadata.solar_elevation),
-                    cloud_cover=str(self.metadata.cloud_cover),
-                    alteration_type=alteration_type.value
-                )
-        
-        logger.info(f"Saved {alteration_type.value}_map.tif with correct georeferencing to {output_file}")
 
 def main():
     """Example usage of the ASTER Geological Mapper"""
