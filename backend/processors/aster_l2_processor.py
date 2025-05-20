@@ -86,7 +86,7 @@ class ASTER_L2_Processor:
         if not self.swir_file.exists():
             raise FileNotFoundError(f"SWIR file not found: {self.swir_file}")
             
-        # Define band mappings
+        # Define band mappings - base names without prefixes
         self.vnir_datasets = {
             1: 'Band1',
             2: 'Band2',
@@ -102,24 +102,16 @@ class ASTER_L2_Processor:
             9: 'Band9'
         }
         
+        # Will hold the actual dataset names with prefixes if detected
+        self.vnir_actual_datasets = {}
+        self.swir_actual_datasets = {}
+        
         # Initialize data storage
         self.raw_reflectance_data = {}
         self.reflectance_data = {}
         self.qa_data = {}
         
-        # Define mineral indices
-        #self.initialize_mineral_indices()
-        
-        # Process data
-        logger.info("Starting data processing...")
-        self.load_data()
-        logger.info(f"Raw data loaded, bands available: {list(self.raw_reflectance_data.keys())}")
-        
-        self.resample_data()
-        logger.info(f"Data resampled, bands available: {list(self.reflectance_data.keys())}")
-        
-        if not self.reflectance_data:
-            raise RuntimeError("No data was successfully resampled")
+    
         
         # Define enhanced mineral indices with optimized band ratios
         self.mineral_indices = {
@@ -242,6 +234,20 @@ class ASTER_L2_Processor:
         
 
         
+       # Process data
+        logger.info("Starting data processing...")
+        self.load_data()
+        logger.info(f"Raw data loaded, bands available: {list(self.raw_reflectance_data.keys())}")
+        
+        self.resample_data()
+        logger.info(f"Data resampled, bands available: {list(self.reflectance_data.keys())}")
+        
+        if not self.reflectance_data:
+            raise RuntimeError("No data was successfully resampled")
+        
+        # Initialize mineral indices
+        self.initialize_mineral_indices()
+        
         # Apply cloud mask if cloud coverage > 0
         if self.metadata and self.metadata.cloud_cover > 0:
             self.apply_cloud_mask()
@@ -326,13 +332,33 @@ class ASTER_L2_Processor:
                 available_vars = list(vnir.variables.keys())
                 logger.info(f"Available VNIR variables: {available_vars}")
                 
-                for band, dataset in self.vnir_datasets.items():
-                    if dataset not in vnir.variables:
-                        logger.warning(f"Dataset {dataset} not found in VNIR file")
+                # Detect VNIR band naming pattern
+                vnir_prefix = ""
+                for var in available_vars:
+                    if "Band1" in var:
+                        if ":" in var:  # Prefixed pattern like SurfaceRadianceVNIR:Band1
+                            vnir_prefix = var.split(":")[0] + ":"
+                        break
+                
+                logger.info(f"Detected VNIR prefix: '{vnir_prefix}'")
+                
+                # Load VNIR bands
+                for band, band_name in self.vnir_datasets.items():
+                    # Try with and without prefix
+                    dataset_name = f"{vnir_prefix}{band_name}"
+                    alt_dataset_name = band_name  # Without prefix
+                    
+                    # Check if either name exists
+                    if dataset_name in available_vars:
+                        use_name = dataset_name
+                    elif alt_dataset_name in available_vars:
+                        use_name = alt_dataset_name
+                    else:
+                        logger.warning(f"Dataset {band_name} not found in VNIR file (tried with and without prefix)")
                         continue
-                        
+                    
                     try:
-                        data = vnir.variables[dataset][:]
+                        data = vnir.variables[use_name][:]
                         if data is None:
                             logger.warning(f"Loaded null data for VNIR band {band}")
                             continue
@@ -348,30 +374,58 @@ class ASTER_L2_Processor:
                         logger.error(f"Error loading VNIR band {band}: {str(e)}")
             
             # Load SWIR data
-            with Dataset(self.swir_file, 'r') as swir:
-                available_vars = list(swir.variables.keys())
-                logger.info(f"Available SWIR variables: {available_vars}")
-                
-                for band, dataset in self.swir_datasets.items():
-                    if dataset not in swir.variables:
-                        logger.warning(f"Dataset {dataset} not found in SWIR file")
-                        continue
+            if hasattr(self, 'swir_file') and self.swir_file and Path(self.swir_file).exists():
+                with Dataset(self.swir_file, 'r') as swir:
+                    available_vars = list(swir.variables.keys())
+                    logger.info(f"Available SWIR variables: {available_vars}")
+                    
+                    # Detect SWIR band naming pattern
+                    swir_prefix = ""
+                    for var in available_vars:
+                        if "Band4" in var:
+                            if ":" in var:  # Prefixed pattern like SurfaceRadianceSWIR:Band4
+                                swir_prefix = var.split(":")[0] + ":"
+                            break
+                        # Also check for Band5, Band6, etc. in case Band4 is missing
+                        elif any(f"Band{i}" in var for i in range(5, 10)):
+                            if ":" in var:
+                                swir_prefix = var.split(":")[0] + ":"
+                            break
+                    
+                    logger.info(f"Detected SWIR prefix: '{swir_prefix}'")
+                    
+                    # Load SWIR bands
+                    for band, band_name in self.swir_datasets.items():
+                        # Try with and without prefix
+                        dataset_name = f"{swir_prefix}{band_name}"
+                        alt_dataset_name = band_name  # Without prefix
                         
-                    try:
-                        data = swir.variables[dataset][:]
-                        if data is None:
-                            logger.warning(f"Loaded null data for SWIR band {band}")
+                        # Check if either name exists
+                        if dataset_name in available_vars:
+                            use_name = dataset_name
+                        elif alt_dataset_name in available_vars:
+                            use_name = alt_dataset_name
+                        else:
+                            logger.warning(f"Dataset {band_name} not found in SWIR file (tried with and without prefix)")
                             continue
-                            
-                        data = data.astype(np.float32)
-                        data = data * 0.001  # Scale factor
-                        data[data < 0] = 0
-                        data[data > 1] = 1
                         
-                        self.raw_reflectance_data[band] = data
-                        logger.info(f"Loaded SWIR band {band} with shape {data.shape}")
-                    except Exception as e:
-                        logger.error(f"Error loading SWIR band {band}: {str(e)}")
+                        try:
+                            data = swir.variables[use_name][:]
+                            if data is None:
+                                logger.warning(f"Loaded null data for SWIR band {band}")
+                                continue
+                                
+                            data = data.astype(np.float32)
+                            data = data * 0.001  # Scale factor
+                            data[data < 0] = 0
+                            data[data > 1] = 1
+                            
+                            self.raw_reflectance_data[band] = data
+                            logger.info(f"Loaded SWIR band {band} with shape {data.shape}")
+                        except Exception as e:
+                            logger.error(f"Error loading SWIR band {band}: {str(e)}")
+            else:
+                logger.warning("No SWIR file provided or file doesn't exist. Running in VNIR-only mode.")
                         
         except Exception as e:
             logger.error(f"Error loading data: {str(e)}")
@@ -381,6 +435,8 @@ class ASTER_L2_Processor:
             raise RuntimeError("No reflectance data was successfully loaded")
             
         logger.info(f"Successfully loaded {len(self.raw_reflectance_data)} bands")
+
+
 
     def validate_data(self, mineral: MineralIndices) -> bool:
         """
@@ -673,13 +729,31 @@ class ASTER_L2_Processor:
     def resample_data(self):
         """Resample all bands to match SWIR resolution"""
         try:
-            # Get SWIR resolution from band 4
-            if 4 not in self.raw_reflectance_data:
-                raise ValueError("Band 4 (SWIR) not available for resampling target")
+            # Determine target shape
+            target_shape = None
+            target_band = None
+            
+            # First try to use a SWIR band (preferably band 4) as the target
+            swir_bands = [b for b in self.raw_reflectance_data.keys() if b >= 4]
+            if swir_bands:
+                # Prefer band 4 if available
+                if 4 in swir_bands:
+                    target_band = 4
+                else:
+                    target_band = min(swir_bands)  # Use the lowest available SWIR band
                 
-            target_shape = self.raw_reflectance_data[4].shape
-            logger.info(f"Target resampling shape: {target_shape}")
-
+                target_shape = self.raw_reflectance_data[target_band].shape
+                logger.info(f"Using SWIR band {target_band} as resampling target with shape: {target_shape}")
+            # If no SWIR bands, use a VNIR band
+            else:
+                vnir_bands = [b for b in self.raw_reflectance_data.keys() if b < 4]
+                if vnir_bands:
+                    target_band = max(vnir_bands)  # Use the highest VNIR band (usually band 3)
+                    target_shape = self.raw_reflectance_data[target_band].shape
+                    logger.info(f"No SWIR bands available, using VNIR band {target_band} as resampling target with shape: {target_shape}")
+                else:
+                    raise ValueError("No bands available for resampling target")
+            
             # Resample each band
             for band, data in self.raw_reflectance_data.items():
                 try:
@@ -710,6 +784,9 @@ class ASTER_L2_Processor:
         except Exception as e:
             logger.error(f"Error during resampling: {str(e)}")
             raise RuntimeError(f"Resampling failed: {str(e)}")
+        finally:
+            logger.info(f"Resampling complete. Available bands: {list(self.reflectance_data.keys())}")
+            return self.reflectance_data
 
 
     def apply_cloud_mask(self):

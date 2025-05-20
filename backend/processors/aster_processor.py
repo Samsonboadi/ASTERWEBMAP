@@ -126,10 +126,28 @@ class ASTERProcessor:
             import zipfile
             
             for zip_file in zip_files:
-                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                    zip_ref.extractall(self.extracted_dir)
+                logger.info(f"Extracting {zip_file}")
                 
-                logger.info(f"Extracted {zip_file}")
+                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                    # List all files in the zip
+                    file_list = zip_ref.namelist()
+                    logger.info(f"Files in zip: {file_list}")
+                    
+                    # Extract all files
+                    zip_ref.extractall(self.extracted_dir)
+                    
+                    logger.info(f"Extracted {len(file_list)} files from {zip_file}")
+            
+            # Check if we have both VNIR and SWIR files
+            extracted_files = list(self.extracted_dir.glob('**/*.hdf'))
+            logger.info(f"Extracted {len(extracted_files)} HDF files")
+            
+            if len(extracted_files) < 2:
+                logger.warning("Expected at least 2 HDF files (VNIR and SWIR), but found fewer")
+                
+            # Extract metadata files if they exist
+            met_files = list(self.extracted_dir.glob('**/*.met'))
+            logger.info(f"Extracted {len(met_files)} metadata files")
             
             return True
         except Exception as e:
@@ -138,7 +156,7 @@ class ASTERProcessor:
     
     def find_aster_files(self) -> Tuple[Optional[Path], Optional[Path]]:
         """
-        Find VNIR and SWIR files in the extracted directory
+        Find matching VNIR and SWIR files in the extracted directory
         
         Returns:
         --------
@@ -146,86 +164,106 @@ class ASTERProcessor:
             Paths to VNIR and SWIR files
         """
         # Look for HDF files in extracted directory
-        vnir_file = None
-        swir_file = None
         hdf_files = list(self.extracted_dir.glob('**/*.hdf'))
         
         logger.info(f"Found {len(hdf_files)} HDF files in {self.extracted_dir}")
         
-        # First, try to identify files by checking file contents
-        for file_path in hdf_files:
-            try:
-                with Dataset(file_path, 'r') as ds:
-                    variables = list(ds.variables.keys())
-                    
-                    # Check for VNIR bands (1-3)
-                    has_vnir_bands = any(f'Band{i}' in variables for i in range(1, 4))
-                    # Check for SWIR bands (4-9)
-                    has_swir_bands = any(f'Band{i}' in variables for i in range(4, 10))
-                    
-                    if has_vnir_bands and not has_swir_bands:
-                        vnir_file = file_path
-                        logger.info(f"Identified VNIR file based on band content: {vnir_file}")
-                    elif has_swir_bands:
-                        swir_file = file_path
-                        logger.info(f"Identified SWIR file based on band content: {swir_file}")
-            except Exception as e:
-                logger.warning(f"Error examining file {file_path}: {str(e)}")
+        if not hdf_files:
+            logger.error("No HDF files found in the extracted directory")
+            return None, None
         
-        # If we haven't identified both files by content, try filename patterns
-        if not (vnir_file and swir_file):
-            # Look for files with VNIR or SWIR in the name
+        vnir_file = None
+        swir_file = None
+        
+        # First try to identify files by timestamp pattern in filename
+        if len(hdf_files) >= 2:
+            # Group files by their base name (excluding timestamp)
+            file_groups = {}
             for file_path in hdf_files:
-                lower_name = file_path.name.lower()
-                if 'vnir' in lower_name:
-                    vnir_file = file_path
-                    logger.info(f"Identified VNIR file based on filename: {vnir_file}")
-                elif 'swir' in lower_name:
-                    swir_file = file_path
-                    logger.info(f"Identified SWIR file based on filename: {swir_file}")
+                # Parse the filename to extract components
+                # Example: AST_09XT_00307032001075305_20250515100232_1324576.hdf
+                # We want to group by: AST_09XT_00307032001075305_TIMESTAMP_1324576.hdf
+                name_parts = file_path.stem.split('_')
+                if len(name_parts) >= 5:
+                    # Remove the timestamp part and create a base name
+                    timestamp_part = name_parts[-2]  # e.g., 20250515100232
+                    name_parts_copy = name_parts.copy()
+                    name_parts_copy[-2] = "TIMESTAMP"  # Replace timestamp with placeholder
+                    base_name = '_'.join(name_parts_copy)
+                    
+                    # Add to group
+                    if base_name not in file_groups:
+                        file_groups[base_name] = []
+                    file_groups[base_name].append((file_path, timestamp_part))
+            
+            # Find pairs of files that differ only by sequential timestamps
+            for base_name, files in file_groups.items():
+                if len(files) >= 2:
+                    # Sort by timestamp
+                    files.sort(key=lambda x: x[1])
+                    
+                    # Check if the timestamps are sequential
+                    timestamps = [int(ts) for _, ts in files]
+                    for i in range(len(timestamps) - 1):
+                        if timestamps[i+1] - timestamps[i] == 1:
+                            # Found a sequential pair - first is VNIR, second is SWIR
+                            vnir_candidate = files[i][0]
+                            swir_candidate = files[i+1][0]
+                            
+                            # Verify by file size (VNIR should be larger)
+                            vnir_size = vnir_candidate.stat().st_size
+                            swir_size = swir_candidate.stat().st_size
+                            
+                            if vnir_size > swir_size:
+                                vnir_file = vnir_candidate
+                                swir_file = swir_candidate
+                                logger.info(f"Identified VNIR/SWIR pair by sequential timestamps and file size")
+                                logger.info(f"VNIR: {vnir_file} ({vnir_size} bytes)")
+                                logger.info(f"SWIR: {swir_file} ({swir_size} bytes)")
+                                break
+                            else:
+                                # If sizes don't match the expected pattern, try swapping
+                                logger.warning(f"File sizes don't match expected pattern (VNIR > SWIR)")
+                                logger.warning(f"First file: {vnir_candidate} ({vnir_size} bytes)")
+                                logger.warning(f"Second file: {swir_candidate} ({swir_size} bytes)")
+                                logger.warning("Trying swap...")
+                                
+                                # Check file contents to confirm
+                                if self._verify_file_content(swir_candidate, 'VNIR') and \
+                                self._verify_file_content(vnir_candidate, 'SWIR'):
+                                    logger.info("File content verification confirms swapped order")
+                                    vnir_file = swir_candidate
+                                    swir_file = vnir_candidate
+                                    break
+                    
+                    if vnir_file and swir_file:
+                        break
         
-        # If we've found VNIR but not SWIR, try to find a matching SWIR file
-        if vnir_file and not swir_file:
-            swir_file = self.find_matching_swir_file(vnir_file)
-        
-        # If we still haven't found the files, try picking by file size (VNIR typically larger)
+        # If we couldn't identify by timestamp pattern, try checking file content and size
         if not (vnir_file and swir_file) and len(hdf_files) >= 2:
+            # Sort by file size (VNIR is typically larger)
+            hdf_files.sort(key=lambda x: x.stat().st_size, reverse=True)
+            
+            # Verify content to make sure we have the correct files
+            if self._verify_file_content(hdf_files[0], 'VNIR') and \
+            self._verify_file_content(hdf_files[1], 'SWIR'):
+                vnir_file = hdf_files[0]
+                swir_file = hdf_files[1]
+                logger.info(f"Identified VNIR/SWIR pair by file size and content verification")
+                logger.info(f"VNIR: {vnir_file} ({vnir_file.stat().st_size} bytes)")
+                logger.info(f"SWIR: {swir_file} ({swir_file.stat().st_size} bytes)")
+        
+        # If we still don't have a definitive identification, use any available files
+        if not vnir_file and hdf_files:
+            # As a last resort, just use the largest file as VNIR
             hdf_files.sort(key=lambda x: x.stat().st_size, reverse=True)
             vnir_file = hdf_files[0]
-            swir_file = hdf_files[1]
-            logger.info(f"Using largest file as VNIR: {vnir_file}")
-            logger.info(f"Using second largest file as SWIR: {swir_file}")
-        
-        # Verify the files by checking their content
-        if vnir_file and swir_file:
-            # Verify VNIR file actually has VNIR bands
-            try:
-                with Dataset(vnir_file, 'r') as ds:
-                    variables = list(ds.variables.keys())
-                    has_vnir_bands = any(f'Band{i}' in variables for i in range(1, 4))
-                    if not has_vnir_bands:
-                        logger.warning(f"Supposed VNIR file {vnir_file} doesn't contain VNIR bands")
-                        vnir_file = None
-            except Exception as e:
-                logger.warning(f"Error verifying VNIR file {vnir_file}: {str(e)}")
+            logger.warning(f"No definitive VNIR file identified, using largest file: {vnir_file}")
             
-            # Verify SWIR file actually has SWIR bands
-            try:
-                with Dataset(swir_file, 'r') as ds:
-                    variables = list(ds.variables.keys())
-                    has_swir_bands = any(f'Band{i}' in variables for i in range(4, 10))
-                    if not has_swir_bands:
-                        logger.warning(f"Supposed SWIR file {swir_file} doesn't contain SWIR bands")
-                        # If the file doesn't have SWIR bands but has VNIR bands, it might be misidentified
-                        has_vnir_bands = any(f'Band{i}' in variables for i in range(1, 4))
-                        if has_vnir_bands:
-                            logger.warning(f"The file {swir_file} actually contains VNIR bands")
-                            # Swap the files if the "SWIR" file actually has VNIR bands and we don't have a VNIR file
-                            if not vnir_file:
-                                vnir_file = swir_file
-                        swir_file = None
-            except Exception as e:
-                logger.warning(f"Error verifying SWIR file {swir_file}: {str(e)}")
+            # Try to find a matching SWIR file
+            if len(hdf_files) > 1:
+                swir_file = hdf_files[1]
+                logger.warning(f"No definitive SWIR file identified, using second largest file: {swir_file}")
         
         # Log what we found
         if vnir_file:
@@ -239,6 +277,44 @@ class ASTERProcessor:
             logger.warning("No SWIR file found")
         
         return vnir_file, swir_file
+
+    def _verify_file_content(self, file_path: Path, expected_type: str) -> bool:
+        """
+        Verify the content of an HDF file to determine if it contains VNIR or SWIR data
+        
+        Parameters:
+        -----------
+        file_path : Path
+            Path to the HDF file
+        expected_type : str
+            Expected type ('VNIR' or 'SWIR')
+            
+        Returns:
+        --------
+        bool
+            True if the file contains the expected type of data
+        """
+        try:
+            with Dataset(file_path, 'r') as ds:
+                variables = list(ds.variables.keys())
+                
+                # Check for presence of variables with expected prefixes
+                has_vnir_prefix = any('SurfaceRadianceVNIR' in var for var in variables)
+                has_swir_prefix = any('SurfaceRadianceSWIR' in var for var in variables)
+                
+                # Check for specific band ranges
+                has_vnir_bands = any(f'Band{i}' in ''.join(variables) for i in range(1, 4))
+                has_swir_bands = any(f'Band{i}' in ''.join(variables) for i in range(4, 10))
+                
+                if expected_type == 'VNIR':
+                    return has_vnir_prefix or has_vnir_bands
+                elif expected_type == 'SWIR':
+                    return has_swir_prefix or has_swir_bands
+                else:
+                    return False
+        except Exception as e:
+            logger.error(f"Error verifying file content of {file_path}: {str(e)}")
+            return False
     
 
 
