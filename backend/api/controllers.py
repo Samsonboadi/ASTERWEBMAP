@@ -1,4 +1,3 @@
-# backend/api/controllers.py
 """
 Controller functions for the ASTER Web Explorer backend
 """
@@ -9,6 +8,7 @@ import logging
 import datetime
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import uuid
 import glob
 import zipfile
@@ -31,7 +31,6 @@ from processors.aster_band_math import MapCombiner, TargetedMapGenerator, Combin
 from processors.aster_advanced_analysis import ASTER_Advanced_Analysis
 from processors.gold_prospectivity_mapper import GoldProspectivityMapper
 
-
 # Initialize logger
 logger = logging.getLogger(__name__)
 
@@ -41,16 +40,18 @@ _scenes = {}
 _processing_status = {}
 _processing_threads = {}
 
+# Thread pool executor for managing background tasks (Recommendation: Better thread management)
+executor = ThreadPoolExecutor(max_workers=4)
+
 def get_all_scenes():
     """
-    Get all available scenes
-    
+    Get all available scenes, only including those that have completed processing.
+
     Returns:
     --------
     list
         List of scene objects
     """
-    # In production, query database
     data_dir = Path(Config.DATA_DIR) / "processed"
     data_dir.mkdir(parents=True, exist_ok=True)
     scene_dirs = [d for d in data_dir.glob("*") if d.is_dir()]
@@ -59,25 +60,27 @@ def get_all_scenes():
     
     scenes = []
     for scene_dir in scene_dirs:
-        # Try to read metadata
         metadata_path = scene_dir / "metadata.json"
         if metadata_path.exists():
             try:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                    
+                
                 # Get processing status
                 status = _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
                 
-                # Include scene in list
-                scenes.append({
-                    "id": scene_dir.name,
-                    "name": metadata.get("name", scene_dir.name),
-                    "date": metadata.get("acquisition_date", metadata.get("upload_date", "Unknown")),
-                    "cloudCover": metadata.get("cloud_cover", 0),
-                    "status": status
-                })
-                logger.info(f"Added scene {scene_dir.name} to list")
+                # Only include completed scenes (Recommendation: Handle in-progress scenes)
+                if status == ProcessingStatus.COMPLETED.value:
+                    scenes.append({
+                        "id": scene_dir.name,
+                        "name": metadata.get("name", scene_dir.name),
+                        "date": metadata.get("acquisition_date", metadata.get("upload_date", "Unknown")),
+                        "cloudCover": metadata.get("cloud_cover", 0),
+                        "status": status
+                    })
+                    logger.info(f"Added completed scene {scene_dir.name} to list")
+                else:
+                    logger.info(f"Skipping scene {scene_dir.name} as it is not completed (status: {status})")
             except Exception as e:
                 logger.error(f"Error reading metadata for {scene_dir.name}: {str(e)}")
                 # Add with minimal information
@@ -90,23 +93,15 @@ def get_all_scenes():
                 })
                 logger.info(f"Added scene {scene_dir.name} with minimal info due to error")
         else:
-            # Add with minimal information if no metadata file
-            logger.warning(f"No metadata found for {scene_dir.name}, adding with minimal info")
-            scenes.append({
-                "id": scene_dir.name,
-                "name": scene_dir.name,
-                "date": "Unknown",
-                "cloudCover": 0,
-                "status": _processing_status.get(scene_dir.name, {}).get("status", ProcessingStatus.IDLE.value)
-            })
+            logger.warning(f"No metadata found for {scene_dir.name}, skipping")
     
     logger.info(f"Returning {len(scenes)} scenes")
     return scenes
 
 def get_scene_by_id(scene_id):
     """
-    Get scene details by ID
-    
+    Get scene details by ID.
+
     Parameters:
     -----------
     scene_id : str
@@ -117,41 +112,36 @@ def get_scene_by_id(scene_id):
     dict
         Scene object or None if not found
     """
-    # Try to read metadata
     metadata_path = Path(Config.DATA_DIR) / "processed" / scene_id / "metadata.json"
     if metadata_path.exists():
         try:
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
                 
-                # Get processing status
-                status_info = _processing_status.get(scene_id, {})
-                status = status_info.get("status", ProcessingStatus.IDLE.value)
-                
-                # Get bounds from metadata
-                bounds = metadata.get("bounds", None)
-                
-                # Check for thumbnail
-                thumbnail_path = Path(Config.DATA_DIR) / "processed" / scene_id / "thumbnail.png"
-                has_thumbnail = thumbnail_path.exists()
-                
-                # Combine metadata with status
-                scene = {
-                    "id": scene_id,
-                    "name": metadata.get("name", scene_id),
-                    "date": metadata.get("acquisition_date", "Unknown"),
-                    "cloudCover": metadata.get("cloud_cover", 0),
-                    "status": status,
-                    "bounds": bounds,
-                    "thumbnail": f"/api/scenes/{scene_id}/thumbnail" if has_thumbnail else None
-                }
-                
-                return scene
+            status_info = _processing_status.get(scene_id, {})
+            status = status_info.get("status", ProcessingStatus.IDLE.value)
+            
+            bounds = metadata.get("bounds", None)
+            
+            thumbnail_path = Path(Config.DATA_DIR) / "processed" / scene_id / "thumbnail.png"
+            has_thumbnail = thumbnail_path.exists()
+            
+            scene = {
+                "id": scene_id,
+                "name": metadata.get("name", scene_id),
+                "date": metadata.get("acquisition_date", "Unknown"),
+                "cloudCover": metadata.get("cloud_cover", 0),
+                "status": status,
+                "bounds": bounds,
+                "thumbnail": f"/api/scenes/{scene_id}/thumbnail" if has_thumbnail else None,
+                "processingMode": metadata.get("processing_mode", "Full")  # Added for VNIR-only mode feedback
+            }
+            
+            return scene
         except Exception as e:
             logger.error(f"Error reading metadata for {scene_id}: {str(e)}")
             return None
     else:
-        # Look for the directory without metadata
         scene_dir = Path(Config.DATA_DIR) / "processed" / scene_id
         if scene_dir.exists() and scene_dir.is_dir():
             return {
@@ -165,8 +155,8 @@ def get_scene_by_id(scene_id):
 
 def upload_scene(file, metadata=None):
     """
-    Upload a new scene file and automatically start processing
-    
+    Upload a new scene file without automatically starting processing.
+
     Parameters:
     -----------
     file : FileStorage
@@ -179,35 +169,28 @@ def upload_scene(file, metadata=None):
     dict
         Upload result with scene ID
     """
-    # Generate a unique scene ID
     scene_id = f"scene_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
     
-    # Create scene directory
     scene_dir = Path(Config.DATA_DIR) / "raw" / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save file
     filename = secure_filename(file.filename)
     file_path = scene_dir / filename
     file.save(str(file_path))
     
-    # Save metadata
     if metadata is None:
         metadata = {}
     
-    # Add original filename, upload date, and file size to metadata
     metadata.update({
         "original_filename": filename,
         "upload_date": datetime.datetime.now().isoformat(),
         "file_size": os.path.getsize(file_path),
-        "name": metadata.get("name", filename)  # Ensure name is always set
+        "name": metadata.get("name", filename)
     })
     
-    # Write metadata to file
     with open(scene_dir / "metadata.json", 'w') as f:
         json.dump(metadata, f, indent=2)
     
-    # Initialize processing status
     _processing_status[scene_id] = {
         "status": ProcessingStatus.IDLE.value,
         "progress": 0,
@@ -217,11 +200,9 @@ def upload_scene(file, metadata=None):
         "end_time": None
     }
     
-    # Create processed directory for this scene to ensure it's detected
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     processed_dir.mkdir(parents=True, exist_ok=True)
     
-    # Copy metadata to processed directory with default bounds
     with open(processed_dir / "metadata.json", 'w') as f:
         metadata.update({
             "scene_id": scene_id,
@@ -238,48 +219,17 @@ def upload_scene(file, metadata=None):
     
     logger.info(f"Uploaded new scene {scene_id}: {filename}")
     
-    # Automatically start processing if it's a zip file
-    if filename.lower().endswith('.zip'):
-        logger.info(f"Automatically starting processing for scene {scene_id}")
-        try:
-            # Use a simple processing configuration focused on the available bands
-            processing_options = {
-                "extract": True,
-                "process_minerals": False,  # Disable mineral mapping which requires SWIR
-                "process_alteration": False,  # Disable alteration mapping which requires SWIR
-                "process_gold_pathfinders": False,  # Disable gold pathfinders which requires SWIR
-                "enhanced_visualization": True,  # Keep visualization on - works with VNIR only
-                "process_advanced_analysis": False,  # Disable advanced analysis which requires SWIR
-                "vnir_only_mode": False  # New option to indicate we should use VNIR-only mode
-            }
-            
-            # Start processing in a separate thread (non-blocking)
-            thread = threading.Thread(
-                target=_process_scene_worker,
-                args=(scene_id, processing_options)
-            )
-            thread.daemon = True
-            thread.start()
-            
-            # Store thread reference
-            _processing_threads[scene_id] = thread
-            
-            logger.info(f"Started processing thread for VNIR-only scene {scene_id}")
-        except Exception as e:
-            logger.error(f"Error starting processing for scene {scene_id}: {str(e)}")
-    
     return {
         "sceneId": scene_id,
         "filename": filename,
         "status": "success",
-        "processingStarted": filename.lower().endswith('.zip')
+        "processingStarted": False  # Let the frontend initiate processing
     }
-
 
 def _process_scene_worker(scene_id, options):
     """
-    Worker function for processing a scene in the background
-    
+    Worker function for processing a scene in the background.
+
     Parameters:
     -----------
     scene_id : str
@@ -288,25 +238,12 @@ def _process_scene_worker(scene_id, options):
         Processing options
     """
     try:
-        # Update status to PROCESSING
-        _processing_status[scene_id] = {
-            "status": ProcessingStatus.PROCESSING.value,
-            "progress": 0,
-            "stage": ProcessingStages.EXTRACT.value,
-            "error": None,
-            "start_time": datetime.datetime.now().isoformat(),
-            "end_time": None
-        }
-        
         logger.info(f"Started processing scene {scene_id} with options: {options}")
         
-        # Initialize the processor
         processor = ASTERProcessor(scene_id, Config.DATA_DIR)
         
-        # Check if we're in VNIR-only mode
         vnir_only_mode = options.get('vnir_only_mode', False)
         
-        # Extract data
         processor.update_status(
             ProcessingStatus.PROCESSING, 
             5, 
@@ -316,16 +253,13 @@ def _process_scene_worker(scene_id, options):
         
         processor.extract_data()
         
-        # Find ASTER files - modified for VNIR-only mode if needed
         if vnir_only_mode:
-            # Find only VNIR file and use it for both VNIR and SWIR
             vnir_file = None
             for file_path in processor.extracted_dir.glob('**/*.hdf'):
                 if 'vnir' in file_path.name.lower() or 'AST_09XT' in file_path.name.upper():
                     vnir_file = file_path
                     break
             
-            # If no specific VNIR file found, just take the first HDF file
             if vnir_file is None:
                 hdf_files = list(processor.extracted_dir.glob('**/*.hdf'))
                 if hdf_files:
@@ -334,10 +268,7 @@ def _process_scene_worker(scene_id, options):
             if vnir_file:
                 logger.info(f"VNIR-only mode: Using {vnir_file} for both VNIR and SWIR inputs")
                 
-                # Create a custom VNIRProcessor that doesn't require SWIR
                 from processors.vnir_processor import VNIRProcessor
-                
-                # Create a minimal SceneMetadata with dummy values for the processor
                 from processors.aster_l2_processor import SceneMetadata, GeographicBounds
                 scene_metadata = SceneMetadata(
                     bounds=GeographicBounds(
@@ -350,35 +281,29 @@ def _process_scene_worker(scene_id, options):
                     utm_zone=30
                 )
                 
-                # Process using the VNIR-only processor
                 vnir_processor = VNIRProcessor(
                     vnir_file=str(vnir_file),
                     metadata=scene_metadata
                 )
                 
-                # Create RGB composites from VNIR bands
                 rgb_dir = processor.processed_dir / 'rgb_composites'
                 rgb_dir.mkdir(exist_ok=True)
                 
-                # Create a true color composite (3-2-1)
                 vnir_processor.create_true_color_composite(rgb_dir / "true_color_composite.tif")
-                
-                # Create a false color composite (NIR-Red-Green: 3-2-1)
                 vnir_processor.create_false_color_composite(rgb_dir / "false_color_composite.tif")
                 
-                # Save individual VNIR bands as GeoTIFF
                 minerals_dir = processor.processed_dir / 'minerals'
                 minerals_dir.mkdir(exist_ok=True)
                 
-                # Save each band as a separate file
-                vnir_processor.save_band_as_geotiff(1, minerals_dir / "band1_blue.tif")
-                vnir_processor.save_band_as_geotiff(2, minerals_dir / "band2_green.tif")
-                vnir_processor.save_band_as_geotiff(3, minerals_dir / "band3_nir.tif")
+                if options.get('process_minerals', False):  # Recommendation: Respect mineral processing option
+                    logger.info("Generating VNIR-specific mineral outputs")
+                    vnir_processor.save_band_as_geotiff(1, minerals_dir / "band1_blue.tif")
+                    vnir_processor.save_band_as_geotiff(2, minerals_dir / "band2_green.tif")
+                    vnir_processor.save_band_as_geotiff(3, minerals_dir / "band3_nir.tif")
+                    vnir_processor.create_ndvi_map(minerals_dir / "ndvi_map.tif")
+                else:
+                    logger.info("Skipping VNIR mineral processing because process_minerals is False")
                 
-                # Create a NDVI map (if bands 3 and 2 are available)
-                vnir_processor.create_ndvi_map(minerals_dir / "ndvi_map.tif")
-                
-                # Copy metadata to processed directory
                 metadata_file = processor.raw_dir / 'metadata.json'
                 if metadata_file.exists():
                     with open(metadata_file, 'r') as f:
@@ -402,7 +327,6 @@ def _process_scene_worker(scene_id, options):
                             'processing_mode': 'VNIR-only'
                         }, f, indent=2)
                 
-                # Update status to completed
                 processor.update_status(
                     ProcessingStatus.COMPLETED, 
                     100, 
@@ -422,11 +346,9 @@ def _process_scene_worker(scene_id, options):
                 )
                 return False
         else:
-            # Continue with normal processing for scenes with both VNIR and SWIR
             success = processor.process(options)
             
             if success:
-                # Update status to COMPLETED
                 _processing_status[scene_id] = {
                     "status": ProcessingStatus.COMPLETED.value,
                     "progress": 100,
@@ -435,10 +357,8 @@ def _process_scene_worker(scene_id, options):
                     "start_time": _processing_status[scene_id]["start_time"],
                     "end_time": datetime.datetime.now().isoformat()
                 }
-                
                 logger.info(f"Processing completed for scene {scene_id}")
             else:
-                # Update status to FAILED
                 _processing_status[scene_id] = {
                     "status": ProcessingStatus.FAILED.value,
                     "progress": 0,
@@ -447,7 +367,6 @@ def _process_scene_worker(scene_id, options):
                     "start_time": _processing_status[scene_id]["start_time"],
                     "end_time": datetime.datetime.now().isoformat()
                 }
-                
                 logger.error(f"Processing failed for scene {scene_id}")
             
             return success
@@ -455,7 +374,6 @@ def _process_scene_worker(scene_id, options):
     except Exception as e:
         logger.error(f"Error processing scene {scene_id}: {str(e)}")
         
-        # Update processing status to FAILED
         _processing_status[scene_id] = {
             "status": ProcessingStatus.FAILED.value,
             "progress": _processing_status.get(scene_id, {}).get("progress", 0),
@@ -467,42 +385,56 @@ def _process_scene_worker(scene_id, options):
         
         return False
 
-
 def process_scene(scene_id, options):
     """
-    Start processing a scene
-    
+    Start processing a scene with the provided options.
+
     Parameters:
     -----------
     scene_id : str
         Scene ID
     options : dict
-        Processing options
-        
+        Processing options from the frontend, e.g., 
+        {'minerals': True, 'alteration': True, 'goldPathfinders': True, 'enhancedVisualization': True}
+
     Returns:
     --------
     dict
-        Processing result
+        Processing result with scene ID, status, and options used
     """
     # Check if the scene exists
     raw_dir = Path(Config.DATA_DIR) / "raw" / scene_id
     if not raw_dir.exists() or not raw_dir.is_dir():
+        logger.error(f"Scene {scene_id} not found in {raw_dir}")
         raise Exception(f"Scene {scene_id} not found")
-    
+
     # Check if the scene is already being processed
     status_info = _processing_status.get(scene_id, {})
     current_status = status_info.get("status", ProcessingStatus.IDLE.value)
-    
+
     if current_status == ProcessingStatus.PROCESSING.value:
-        # Instead of throwing an error, allow reprocessing by killing the previous process
         logger.warning(f"Scene {scene_id} is already being processed. Stopping current process and restarting.")
-        
-        # If there's a thread reference, try to terminate it (this is often not possible in Python)
-        # but we can at least remove the reference
         if scene_id in _processing_threads:
             logger.info(f"Removing reference to previous processing thread for {scene_id}")
             _processing_threads.pop(scene_id, None)
-    
+
+    # Log the raw options received from the frontend
+    logger.info(f"Received raw options from frontend for scene {scene_id}: {options}")
+
+    # Convert frontend options to backend processing options
+    processing_options = {
+        "extract": options.get("extract", True),
+        "process_minerals": options.get("minerals", True),
+        "process_alteration": options.get("alteration", True),
+        "process_gold_pathfinders": options.get("goldPathfinders", True),
+        "enhanced_visualization": options.get("enhancedVisualization", True),
+        "process_advanced_analysis": options.get("process_advanced_analysis", False),
+        "vnir_only_mode": options.get("vnir_only_mode", False)
+    }
+
+    # Log the converted options to ensure they are correct
+    logger.info(f"Converted processing options for scene {scene_id}: {processing_options}")
+
     # Set initial processing status
     _processing_status[scene_id] = {
         "status": ProcessingStatus.PROCESSING.value,
@@ -512,41 +444,23 @@ def process_scene(scene_id, options):
         "start_time": datetime.datetime.now().isoformat(),
         "end_time": None
     }
-    
-    # Convert options from frontend naming to backend naming
-    processing_options = {
-        "extract": True,
-        "process_minerals": options.get("minerals", True),
-        "process_alteration": options.get("alteration", True),
-        "process_gold_pathfinders": options.get("goldPathfinders", True),
-        "enhanced_visualization": options.get("enhancedVisualization", True),
-        "process_advanced_analysis": options.get("advancedAnalysis", True),
-        "vnir_only_mode": options.get("vnir_only_mode", False)
-    }
-    
-    # Start processing in a separate thread
-    thread = threading.Thread(
-        target=_process_scene_worker,
-        args=(scene_id, processing_options)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    # Store thread reference (for potential future cancellation)
-    _processing_threads[scene_id] = thread
-    
-    logger.info(f"Started processing thread for scene {scene_id}")
-    
+
+    # Start processing in a thread pool executor (Recommendation: Better thread management)
+    future = executor.submit(_process_scene_worker, scene_id, processing_options)
+    _processing_threads[scene_id] = future
+
+    logger.info(f"Started processing task for scene {scene_id} with final options: {processing_options}")
+
     return {
         "sceneId": scene_id,
         "status": ProcessingStatus.PROCESSING.value,
-        "mode": "VNIR-only" if processing_options.get("vnir_only_mode") else "Standard"
+        "options": processing_options
     }
 
 def get_processing_status(scene_id):
     """
-    Get processing status for a scene
-    
+    Get processing status for a scene.
+
     Parameters:
     -----------
     scene_id : str
@@ -557,11 +471,9 @@ def get_processing_status(scene_id):
     dict
         Processing status
     """
-    # Check if status exists in memory
     if scene_id in _processing_status:
         return dict(_processing_status[scene_id])
     
-    # Check if there's a status file for the scene
     status_path = Path(Config.DATA_DIR) / "raw" / scene_id / "status.json"
     if status_path.exists():
         try:
@@ -570,7 +482,6 @@ def get_processing_status(scene_id):
         except Exception as e:
             logger.error(f"Error reading status file for {scene_id}: {str(e)}")
     
-    # Return default status if no status found
     return {
         "status": ProcessingStatus.IDLE.value,
         "progress": 0,
@@ -580,11 +491,10 @@ def get_processing_status(scene_id):
         "end_time": None
     }
 
-
 def get_scene_layers(scene_id):
     """
-    Get available layers for a scene
-    
+    Get available layers for a scene.
+
     Parameters:
     -----------
     scene_id : str
@@ -595,24 +505,20 @@ def get_scene_layers(scene_id):
     dict
         Available layers categorized by type
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Check if processing is completed
     status = get_processing_status(scene_id)
     if status.get("status") != ProcessingStatus.COMPLETED.value:
         logger.warning(f"Scene {scene_id} processing not completed")
     
-    # Get layers by type
     mineral_dir = processed_dir / "minerals"
     alteration_dir = processed_dir / "alteration"
     gold_dir = processed_dir / "gold_pathfinders"
     rgb_dir = processed_dir / "rgb_composites"
     analysis_dir = processed_dir / "analysis"
     
-    # Initialize layer collections
     layers = {
         "mineral": [],
         "alteration": [],
@@ -622,52 +528,43 @@ def get_scene_layers(scene_id):
         "geological": []
     }
     
-    # Find mineral layers
     if mineral_dir.exists():
         mineral_files = list(mineral_dir.glob("*_map.tif"))
         layers["mineral"] = [file.stem.split("_")[0] for file in mineral_files]
     
-    # Find alteration layers
     if alteration_dir.exists():
         alteration_files = list(alteration_dir.glob("*_map.tif"))
         layers["alteration"] = [file.stem.split("_")[0] for file in alteration_files]
     
-    # Find gold pathfinder layers
     if gold_dir.exists():
         gold_files = list(gold_dir.glob("*_map.tif"))
         layers["gold"] = [file.stem.split("_")[0] for file in gold_files]
     
-    # Find band combination layers
     if rgb_dir.exists():
         band_files = list(rgb_dir.glob("*_composite.tif"))
         layers["band"] = [file.stem.split("_")[0] for file in band_files]
     
-    # Find band ratio layers
     if analysis_dir.exists():
         ratio_files = list(analysis_dir.glob("*_ratio.tif"))
         layers["ratio"] = [file.stem.split("_")[0] for file in ratio_files]
     
-    # Find geological feature layers
     if analysis_dir.exists():
         geological_files = list(analysis_dir.glob("*_features.tif"))
         layers["geological"] = [file.stem.split("_")[0] for file in geological_files]
     
     return layers
 
-
 def _create_placeholder_tiff(filepath):
     """
-    Create a placeholder GeoTIFF file for development/testing
-    
+    Create a placeholder GeoTIFF file for development/testing.
+
     Parameters:
     -----------
     filepath : Path
         Path to save the GeoTIFF
     """
-    # Create a simple array
     data = np.random.random((100, 100)).astype(np.float32)
     
-    # Create a simple transform
     transform = rasterio.transform.from_bounds(
         west=0,
         south=0,
@@ -677,7 +574,6 @@ def _create_placeholder_tiff(filepath):
         height=100
     )
     
-    # Write to file
     with rasterio.open(
         filepath,
         'w',
@@ -692,13 +588,10 @@ def _create_placeholder_tiff(filepath):
     ) as dst:
         dst.write(data, 1)
 
-
-
-
 def get_layer_file(scene_id, layer_type, layer_name):
     """
-    Get the file path for a specific layer
-    
+    Get the file path for a specific layer.
+
     Parameters:
     -----------
     scene_id : str
@@ -713,7 +606,6 @@ def get_layer_file(scene_id, layer_type, layer_name):
     Path
         Path to the layer file
     """
-    # Map layer type to directory and file extension
     type_mapping = {
         "mineral": ("minerals", "_map.tif"),
         "alteration": ("alteration", "_map.tif"),
@@ -737,34 +629,28 @@ def get_layer_file(scene_id, layer_type, layer_name):
     
     return layer_file
 
-
-
 def _create_placeholder_thumbnail(filepath):
     """
-    Create a placeholder thumbnail image
-    
+    Create a placeholder thumbnail image.
+
     Parameters:
     -----------
     filepath : Path
         Path to save the thumbnail
     """
     try:
-        # Create a simple RGB array
         data = np.random.randint(0, 255, (100, 100, 3)).astype(np.uint8)
-        
-        # Save as PNG
         import matplotlib.pyplot as plt
         plt.imsave(filepath, data)
     except Exception as e:
         logger.error(f"Error creating thumbnail: {str(e)}")
-        # Create an empty file as fallback
         with open(filepath, 'wb') as f:
             f.write(b'')
 
 def get_scene_statistics(scene_id):
     """
-    Get statistics for a scene
-    
+    Get statistics for a scene.
+
     Parameters:
     -----------
     scene_id : str
@@ -775,12 +661,10 @@ def get_scene_statistics(scene_id):
     dict
         Scene statistics
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Get metadata
     metadata_path = processed_dir / "metadata.json"
     if metadata_path.exists():
         try:
@@ -792,22 +676,16 @@ def get_scene_statistics(scene_id):
     else:
         metadata = {}
     
-    # Count mineral maps
     mineral_dir = processed_dir / "minerals"
-    mineral_count = len(list(mineral_dir.glob("*_map.tif"))) if mineral_dir.exists() else 0
-    
-    # Count alteration maps
     alteration_dir = processed_dir / "alteration"
-    alteration_count = len(list(alteration_dir.glob("*_map.tif"))) if alteration_dir.exists() else 0
-    
-    # Count gold pathfinder maps
     gold_dir = processed_dir / "gold_pathfinders"
+    
+    mineral_count = len(list(mineral_dir.glob("*_map.tif"))) if mineral_dir.exists() else 0
+    alteration_count = len(list(alteration_dir.glob("*_map.tif"))) if alteration_dir.exists() else 0
     pathfinder_count = len(list(gold_dir.glob("*_map.tif"))) if gold_dir.exists() else 0
     
-    # Calculate gold pathfinder coverage
     gold_pathfinder_coverage = 0
     if gold_dir.exists() and pathfinder_count > 0:
-        # Try to calculate average coverage from first pathfinder map
         for map_file in gold_dir.glob("*_map.tif"):
             try:
                 with rasterio.open(map_file) as src:
@@ -820,12 +698,10 @@ def get_scene_statistics(scene_id):
             except Exception as e:
                 logger.error(f"Error calculating coverage for {map_file}: {str(e)}")
     
-    # Determine dominant minerals and alteration
     dominant_minerals = "Unknown"
     dominant_alteration = "Unknown"
     
     if mineral_dir.exists():
-        # Try to determine dominant minerals
         minerals = []
         for map_file in mineral_dir.glob("*_map.tif"):
             try:
@@ -839,15 +715,11 @@ def get_scene_statistics(scene_id):
             except Exception as e:
                 logger.error(f"Error analyzing {map_file}: {str(e)}")
                 
-        # Sort minerals by average value
         minerals.sort(key=lambda x: x[1], reverse=True)
-        
-        # Take top 2 minerals
         if minerals:
             dominant_minerals = ", ".join([m[0] for m in minerals[:2]])
     
     if alteration_dir.exists():
-        # Try to determine dominant alteration
         alterations = []
         for map_file in alteration_dir.glob("*_map.tif"):
             try:
@@ -861,14 +733,10 @@ def get_scene_statistics(scene_id):
             except Exception as e:
                 logger.error(f"Error analyzing {map_file}: {str(e)}")
                 
-        # Sort alterations by average value
         alterations.sort(key=lambda x: x[1], reverse=True)
-        
-        # Take top alteration
         if alterations:
             dominant_alteration = alterations[0][0]
     
-    # Create the statistics object
     stats = {
         "acquisitionDate": metadata.get("acquisition_date", "Unknown"),
         "cloudCover": metadata.get("cloud_cover", 0),
@@ -886,8 +754,8 @@ def get_scene_statistics(scene_id):
 
 def generate_prospectivity_map(scene_id, options):
     """
-    Generate a prospectivity map
-    
+    Generate a prospectivity map.
+
     Parameters:
     -----------
     scene_id : str
@@ -900,16 +768,13 @@ def generate_prospectivity_map(scene_id, options):
     dict
         Generation result
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Create prospectivity directory if it doesn't exist
     prospectivity_dir = processed_dir / "prospectivity"
     prospectivity_dir.mkdir(parents=True, exist_ok=True)
     
-    # Parse options
     threshold = options.get("threshold", 0.7)
     pathfinders = options.get("pathfinders", [])
     alterations = options.get("alterations", [])
@@ -918,10 +783,8 @@ def generate_prospectivity_map(scene_id, options):
     logger.info(f"Pathfinders: {pathfinders}")
     logger.info(f"Alterations: {alterations}")
     
-    # Initialize prospectivity mapper
     mapper = GoldProspectivityMapper(output_directory=str(prospectivity_dir))
     
-    # Add pathfinder maps
     gold_dir = processed_dir / "gold_pathfinders"
     if gold_dir.exists():
         for pathfinder in pathfinders:
@@ -933,7 +796,6 @@ def generate_prospectivity_map(scene_id, options):
                 except Exception as e:
                     logger.error(f"Error adding pathfinder map {pathfinder}: {str(e)}")
     
-    # Add alteration maps
     alteration_dir = processed_dir / "alteration"
     if alteration_dir.exists():
         for alteration in alterations:
@@ -946,21 +808,17 @@ def generate_prospectivity_map(scene_id, options):
                     logger.error(f"Error adding alteration map {alteration}: {str(e)}")
     
     try:
-        # Generate prospectivity map
         prospectivity_map = mapper.generate_prospectivity_map("gold_prospectivity.tif")
         logger.info(f"Generated prospectivity map: {prospectivity_map}")
         
-        # Create visualization
         visualization = mapper.visualize_map("gold_prospectivity_visualization.png", 
                                           colormap="prospectivity", 
                                           title="Gold Prospectivity Map")
         logger.info(f"Generated visualization: {visualization}")
         
-        # Extract high prospectivity areas
         high_areas = mapper.get_high_prospectivity_areas(threshold, "high_prospectivity.tif")
         logger.info(f"Generated high prospectivity areas: {high_areas}")
         
-        # Export to GeoJSON for web visualization
         geojson = mapper.export_to_geojson(threshold, "high_prospectivity.geojson")
         logger.info(f"Exported to GeoJSON: {geojson}")
         
@@ -981,8 +839,8 @@ def generate_prospectivity_map(scene_id, options):
 
 def generate_report(scene_id, report_type, options):
     """
-    Generate an analysis report
-    
+    Generate an analysis report.
+
     Parameters:
     -----------
     scene_id : str
@@ -997,16 +855,13 @@ def generate_report(scene_id, report_type, options):
     dict
         Generation result
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Create reports directory if it doesn't exist
     reports_dir = processed_dir / "reports"
     reports_dir.mkdir(exist_ok=True)
     
-    # Generate a placeholder report HTML file
     report_file = reports_dir / f"{report_type}_report.html"
     with open(report_file, 'w') as f:
         f.write(f"""
@@ -1028,7 +883,6 @@ def generate_report(scene_id, report_type, options):
         </html>
         """)
     
-    # Return the report URL
     return {
         "sceneId": scene_id,
         "reportType": report_type,
@@ -1037,8 +891,8 @@ def generate_report(scene_id, report_type, options):
 
 def export_map(scene_id, map_type, map_name, format="geotiff"):
     """
-    Export a map as a downloadable file
-    
+    Export a map as a downloadable file.
+
     Parameters:
     -----------
     scene_id : str
@@ -1055,12 +909,10 @@ def export_map(scene_id, map_type, map_name, format="geotiff"):
     dict
         Export result
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Map type to directory
     type_dir_map = {
         "mineral": "minerals",
         "alteration": "alteration",
@@ -1073,12 +925,10 @@ def export_map(scene_id, map_type, map_name, format="geotiff"):
     if map_type not in type_dir_map:
         raise Exception(f"Invalid map type: {map_type}")
     
-    # Get the directory
     map_dir = processed_dir / type_dir_map[map_type]
     if not map_dir.exists() or not map_dir.is_dir():
         raise Exception(f"Map directory {map_dir} not found")
     
-    # Determine file extension based on format
     if format.lower() == "geotiff":
         ext = ".tif"
         mime_type = "image/tiff"
@@ -1088,7 +938,6 @@ def export_map(scene_id, map_type, map_name, format="geotiff"):
     else:
         raise Exception(f"Unsupported export format: {format}")
     
-    # Look for the file
     if map_type in ["mineral", "alteration", "gold"]:
         file_path = map_dir / f"{map_name}_map{ext}"
     elif map_type in ["band"]:
@@ -1103,7 +952,6 @@ def export_map(scene_id, map_type, map_name, format="geotiff"):
     if not file_path.exists():
         raise Exception(f"Map file {file_path} not found")
     
-    # Return file info
     return {
         "file_path": str(file_path),
         "file_name": file_path.name,
@@ -1112,8 +960,8 @@ def export_map(scene_id, map_type, map_name, format="geotiff"):
 
 def get_prospectivity_areas(scene_id, threshold=0.7):
     """
-    Get gold prospectivity areas as GeoJSON
-    
+    Get gold prospectivity areas as GeoJSON.
+
     Parameters:
     -----------
     scene_id : str
@@ -1126,17 +974,14 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
     dict
         GeoJSON of prospectivity areas
     """
-    # Check if the scene exists
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
         raise Exception(f"Processed scene {scene_id} not found")
     
-    # Check if prospectivity data exists
     prospectivity_dir = processed_dir / "prospectivity"
     geojson_file = prospectivity_dir / "high_prospectivity.geojson"
     
     if not prospectivity_dir.exists() or not geojson_file.exists():
-        # No prospectivity data found, try to generate it
         options = {
             "threshold": threshold,
             "pathfinders": ["gold_alteration", "pyrite", "arsenopyrite"],
@@ -1144,7 +989,6 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
         }
         generate_prospectivity_map(scene_id, options)
     
-    # Check if file exists after generation attempt
     if geojson_file.exists():
         try:
             with open(geojson_file, 'r') as f:
@@ -1152,13 +996,9 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
         except Exception as e:
             logger.error(f"Error reading GeoJSON file: {str(e)}")
     
-    # If we couldn't generate or read the file, return a placeholder result
     logger.warning(f"Returning placeholder prospectivity areas for scene {scene_id}")
     
-    # Placeholder GeoJSON features
     features = {}
-    
-    # High prospectivity (above threshold)
     high_features = {
         "type": "FeatureCollection",
         "features": [
@@ -1185,7 +1025,6 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
         ]
     }
     
-    # Medium prospectivity (between 0.5 and threshold)
     medium_features = {
         "type": "FeatureCollection",
         "features": [
@@ -1212,7 +1051,6 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
         ]
     }
     
-    # Low prospectivity (below 0.5)
     low_features = {
         "type": "FeatureCollection",
         "features": [
@@ -1246,11 +1084,11 @@ def get_prospectivity_areas(scene_id, threshold=0.7):
     }
     
     return features
-    
+
 def getLayerUrl(sceneId, layerType, layerName):
     """
-    Get a specific layer for a scene
-    
+    Get a specific layer for a scene.
+
     Parameters:
     -----------
     sceneId : str
@@ -1265,7 +1103,6 @@ def getLayerUrl(sceneId, layerType, layerName):
     str
         URL to the layer
     """
-    # Map layer type to directory
     type_dir_map = {
         "mineral": "minerals",
         "alteration": "alteration",
@@ -1275,7 +1112,6 @@ def getLayerUrl(sceneId, layerType, layerName):
         "gold": "gold_pathfinders"
     }
     
-    # Map layer type to file suffix
     type_suffix_map = {
         "mineral": "_map.tif",
         "alteration": "_map.tif",
@@ -1288,16 +1124,13 @@ def getLayerUrl(sceneId, layerType, layerName):
     if layerType not in type_dir_map:
         raise ValueError(f"Invalid layer type: {layerType}")
     
-    # Determine the directory and file path
     processed_dir = Path(Config.DATA_DIR) / "processed" / sceneId
     layer_dir = processed_dir / type_dir_map[layerType]
     layer_file = layer_dir / f"{layerName}{type_suffix_map.get(layerType, '.tif')}"
     
-    # Check if the file exists
     if not layer_file.exists():
         raise FileNotFoundError(f"Layer file not found: {layer_file}")
     
-    # Return the URL
     relative_path = f"scenes/{sceneId}/layers/{layerType}/{layerName}"
     url = f"{Config.SERVER_URL}/api/{relative_path}"
     

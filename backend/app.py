@@ -15,11 +15,11 @@ from werkzeug.utils import secure_filename
 from api import create_api_blueprint
 from config import Config
 from utils.enhanced_logging import setup_logging
-
+import sys
 # Initialize application
 app = Flask(__name__)
 app.config.from_object(Config)
-
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 # Configure CORS
 CORS(app, resources={r"/api/*": {"origins": app.config.get('CORS_ORIGINS', '*')}})
 

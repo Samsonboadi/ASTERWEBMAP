@@ -112,37 +112,49 @@ const handleUploadAndProcess = async () => {
 };
 
   // Start processing an existing scene
-  const startProcessing = async (id) => {
+const startProcessing = async (id) => {
     const targetSceneId = id || sceneId;
     if (!targetSceneId) {
-      toast({
-        title: "No Scene Selected",
-        description: "Please select a scene to process or upload a new file.",
-        variant: "destructive"
-      });
-      return;
+        toast({
+            title: "No Scene Selected",
+            description: "Please select a scene to process or upload a new file.",
+            variant: "destructive"
+        });
+        return;
     }
     
+    const forcedOptions = {
+        minerals: true,
+        alteration: true,
+        goldPathfinders: true,
+        enhancedVisualization: true
+    };
+    console.log("Starting processing with forced options:", forcedOptions);
+    
     try {
-      const result = await processScene(targetSceneId, processingOptions);
-      
-      toast({
-        title: "Processing Started",
-        description: "Scene processing has been initiated.",
-      });
-      
-      // Begin polling for status
-      setProcessingStatus(ProcessingStatus.PROCESSING);
-      setIsPolling(true);
-    } catch (error) {
-      toast({
-        title: "Processing Failed",
-        description: error.message || "Failed to start processing.",
-        variant: "destructive"
-      });
-      console.error("Processing error:", error);
+        const result = await processScene(targetSceneId, forcedOptions);
+        if (result.errors) {
+        toast({
+            title: "Processing Warning",
+            description: `Some steps failed: ${result.errors.join(", ")}`,
+            variant: "warning"
+        });
     }
-  };
+        toast({
+            title: "Processing Started",
+            description: "Scene processing has been initiated.",
+        });
+        setProcessingStatus(ProcessingStatus.PROCESSING);
+        setIsPolling(true);
+    } catch (error) {
+        toast({
+            title: "Processing Failed",
+            description: error.message || "Failed to start processing.",
+            variant: "destructive"
+        });
+        console.error("Processing error:", error);
+    }
+};
   
   // Polling for processing status
   useEffect(() => {
@@ -187,6 +199,12 @@ const handleUploadAndProcess = async () => {
     };
   }, [isPolling, sceneId, onProcessingComplete]);
   
+
+  useEffect(() => {
+    console.log("processingOptions changed:", processingOptions);
+}, [processingOptions]);
+
+
   // Check status on initial load if sceneId is provided
   useEffect(() => {
     if (sceneId) {

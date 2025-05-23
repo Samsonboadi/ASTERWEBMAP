@@ -175,18 +175,27 @@ export async function getSceneById(sceneId) {
  * Start processing a scene
  */
 
-export async function processScene(sceneId, processingOptions = {}) {
-  console.log(`Processing scene ${sceneId} with options:`, processingOptions);
+export async function processScene(sceneId, options) {
+  console.log(`Processing scene ${sceneId} with options:`, options);
   try {
+    // Ensure process_minerals is set if minerals is true
+    const processingOptions = {
+      extract: true,
+      process_minerals: options.minerals === true,
+      process_alteration: options.alteration === true,
+      process_gold_pathfinders: options.goldPathfinders === true,
+      enhanced_visualization: options.enhancedVisualization === true
+    };
+    
+    console.log("Sending processing options to backend:", processingOptions);
+    
     return await fetchAPI(`/scenes/${sceneId}/process`, {
       method: 'POST',
       body: JSON.stringify(processingOptions),
     });
   } catch (error) {
-    return handleBackendUnavailable(error, {
-      sceneId,
-      status: 'processing'
-    });
+    console.error("Processing error:", error);
+    throw error;
   }
 }
 

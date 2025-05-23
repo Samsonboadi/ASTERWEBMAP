@@ -595,10 +595,50 @@ class ASTERProcessor:
                 minerals_dir = self.processed_dir / 'minerals'
                 minerals_dir.mkdir(exist_ok=True)
                 
+                # Check write permissions
+                if not os.access(minerals_dir, os.W_OK):
+                    logger.error(f"No write permission for {minerals_dir}")
+                    self.scene_logger.error(f"No write permission for {minerals_dir}")
+                    self.update_status(
+                        ProcessingStatus.FAILED,
+                        0,
+                        None,
+                        f"No write permission for {minerals_dir}"
+                    )
+                    with open(report_file, 'a') as f:
+                        f.write(f"Status: Failed - No write permission for {minerals_dir}\n")
+                    return False
+                
                 from .aster_l2_processor import MineralIndices
                 
-                for mineral in MineralIndices:
+                logger.info(f"Starting mineral mapping for {len(list(MineralIndices))} minerals")
+                self.scene_logger.info(f"Starting mineral mapping for {len(list(MineralIndices))} minerals")
+                
+                # Try a subset of common minerals first to ensure the process works
+                priority_minerals = [
+                    MineralIndices.ALUNITE,
+                    MineralIndices.KAOLINITE,
+                    MineralIndices.CALCITE,
+                    MineralIndices.CHLORITE,
+                    MineralIndices.IRON_OXIDE
+                ]
+                
+                # Process priority minerals first
+                for mineral in priority_minerals:
                     try:
+                        logger.info(f"Processing priority mineral {mineral.value}")
+                        self.scene_logger.info(f"Processing priority mineral {mineral.value}")
+                        
+                        # First check if the required bands are valid
+                        valid_data = processor.validate_data(mineral)
+                        if not valid_data:
+                            logger.warning(f"Skipping {mineral.value} - required bands are invalid")
+                            self.scene_logger.warning(f"Skipping {mineral.value} - required bands are invalid")
+                            with open(report_file, 'a') as f:
+                                f.write(f"  - {mineral.value}: Skipped - required bands are invalid\n")
+                            continue
+                            
+                        # Process the mineral map
                         processor.save_mineral_map(mineral, minerals_dir)
                         logger.info(f"Processed {mineral.value} map")
                         self.scene_logger.info(f"Processed {mineral.value} map")
@@ -611,7 +651,31 @@ class ASTERProcessor:
                         self.scene_logger.error(f"Stack trace: {traceback.format_exc()}")
                         with open(report_file, 'a') as f:
                             f.write(f"  - {mineral.value}: Error - {str(e)}\n")
-            
+                
+                # Process remaining minerals
+                remaining_minerals = [m for m in MineralIndices if m not in priority_minerals]
+                for mineral in remaining_minerals:
+                    try:
+                        valid_data = processor.validate_data(mineral)
+                        if not valid_data:
+                            logger.warning(f"Skipping {mineral.value} - required bands are invalid")
+                            self.scene_logger.warning(f"Skipping {mineral.value} - required bands are invalid")
+                            with open(report_file, 'a') as f:
+                                f.write(f"  - {mineral.value}: Skipped - required bands are invalid\n")
+                            continue
+                            
+                        processor.save_mineral_map(mineral, minerals_dir)
+                        logger.info(f"Processed {mineral.value} map")
+                        self.scene_logger.info(f"Processed {mineral.value} map")
+                        with open(report_file, 'a') as f:
+                            f.write(f"  - {mineral.value}: Processed successfully\n")
+                    except Exception as e:
+                        logger.error(f"Error processing {mineral.value} map: {str(e)}")
+                        logger.error(f"Stack trace: {traceback.format_exc()}")
+                        self.scene_logger.error(f"Error processing {mineral.value} map: {str(e)}")
+                        self.scene_logger.error(f"Stack trace: {traceback.format_exc()}")
+                        with open(report_file, 'a') as f:
+                            f.write(f"  - {mineral.value}: Error - {str(e)}\n")
             # Initialize geological mapper
             from .aster_geological_mapper import ASTER_Geological_Mapper
             
@@ -634,9 +698,17 @@ class ASTERProcessor:
                 
                 from enums import AlterationIndices
                 
+                # Ensure geological_mapper is initialized with base_processor
+                geological_mapper = ASTER_Geological_Mapper(base_processor=processor)
+                
                 for alteration in AlterationIndices:
                     try:
-                        geological_mapper.save_alteration_map(alteration, alteration_dir)
+                        index_map, confidence_map = geological_mapper.save_alteration_map(alteration, alteration_dir)
+                        if index_map is None or confidence_map is None:
+                            logger.warning(f"Skipping {alteration.value} - not supported or failed to calculate")
+                            with open(report_file, 'a') as f:
+                                f.write(f"  - {alteration.value}: Skipped - not supported or failed\n")
+                            continue
                         logger.info(f"Processed {alteration.value} map")
                         self.scene_logger.info(f"Processed {alteration.value} map")
                         with open(report_file, 'a') as f:
@@ -712,22 +784,16 @@ class ASTERProcessor:
                 
                 from enums import BandCombinations
                 
-                # Define band requirements (adjust based on your BandCombinations)
-                band_requirements = {
-                    BandCombinations.LITHOLOGICAL: [4, 6, 8],
-                    BandCombinations.GENERAL_ALTERATION: [5, 6, 7],
-                    BandCombinations.IRON_OXIDE: [2, 1],
-                    BandCombinations.ALOH_MINERALS: [5, 6, 8],
-                    BandCombinations.MGOH_CARBONATE: [6, 8, 9],
-                    BandCombinations.CROSTA: [4, 5, 6],
-                    BandCombinations.SULFIDE: [5, 6, 7],
-                    BandCombinations.CHLORITE_ALTERATION: [6, 8, 9]
-                }
+                # Initialize the geological mapper if not already done elsewhere
+                from .aster_geological_mapper import ASTER_Geological_Mapper
+                geological_mapper = ASTER_Geological_Mapper(processor)
                 
                 for combo in BandCombinations:
                     try:
-                        # Validate required bands
-                        required_bands = band_requirements.get(combo, [])
+                        # Get required bands from the mapper
+                        required_bands = geological_mapper.get_required_bands(combo)
+                        valid_combo = True
+                        
                         for band in required_bands:
                             band_data = processor.get_band_data(band)
                             if band_data is None:
@@ -735,21 +801,35 @@ class ASTERProcessor:
                                 self.scene_logger.warning(f"Skipping {combo.value}: Band {band} not found")
                                 with open(report_file, 'a') as f:
                                     f.write(f"  - {combo.value}: Skipped - Band {band} not found\n")
-                                continue
-                            if np.any(np.isnan(band_data)) or np.any(band_data == 0):
-                                logger.warning(f"Skipping {combo.value}: Invalid data in band {band}")
-                                self.scene_logger.warning(f"Skipping {combo.value}: Invalid data in band {band}")
+                                valid_combo = False
+                                break  # Exit the inner loop
+                                
+                            # Check if band data has enough valid values
+                            valid_mask = ~np.isnan(band_data)
+                            valid_pixel_count = np.sum(valid_mask)
+                            total_pixels = band_data.size
+                            valid_percentage = (valid_pixel_count / total_pixels) * 100
+                            
+                            if valid_pixel_count < (total_pixels * 0.05):  # Require at least 5% valid pixels
+                                logger.warning(f"Skipping {combo.value}: Insufficient valid data in band {band} (only {valid_percentage:.2f}% valid)")
+                                self.scene_logger.warning(f"Skipping {combo.value}: Insufficient valid data in band {band} (only {valid_percentage:.2f}% valid)")
                                 with open(report_file, 'a') as f:
-                                    f.write(f"  - {combo.value}: Skipped - Invalid data in band {band}\n")
-                                continue
+                                    f.write(f"  - {combo.value}: Skipped - Insufficient valid data in band {band} (only {valid_percentage:.2f}% valid)\n")
+                                valid_combo = False
+                                break  # Exit the inner loop
                         
-                        logger.info(f"Creating band combination: {combo.value}")
-                        self.scene_logger.info(f"Creating band combination: {combo.value}")
-                        geological_mapper.create_band_combination_map(combo, rgb_dir)
-                        logger.info(f"Created {combo.value} band combination")
-                        self.scene_logger.info(f"Created {combo.value} band combination")
-                        with open(report_file, 'a') as f:
-                            f.write(f"  - {combo.value}: Processed successfully\n")
+                        # Only proceed if all bands are valid
+                        if valid_combo:
+                            logger.info(f"Creating band combination: {combo.value}")
+                            self.scene_logger.info(f"Creating band combination: {combo.value}")
+                            geological_mapper.create_band_combination_map(combo, rgb_dir)
+                            logger.info(f"Created {combo.value} band combination")
+                            self.scene_logger.info(f"Created {combo.value} band combination")
+                            with open(report_file, 'a') as f:
+                                f.write(f"  - {combo.value}: Processed successfully\n")
+                        else:
+                            logger.info(f"Skipped {combo.value} due to invalid or missing band data")
+                            self.scene_logger.info(f"Skipped {combo.value} due to invalid or missing band data")
                     except Exception as e:
                         logger.error(f"Error creating {combo.value} band combination: {str(e)}")
                         logger.error(f"Stack trace: {traceback.format_exc()}")
@@ -875,7 +955,24 @@ class ASTERProcessor:
                 f.write(f"Status: Failed - {str(e)}\n")
             
             return False
-    
+
+
+    def get_band_data(self, band_number: int) -> Optional[np.ndarray]:
+        try:
+            if band_number in self.reflectance_data:
+                data = self.reflectance_data[band_number]
+                if np.any(data):
+                    return data
+                logger.warning(f"Band {band_number} contains no valid data")
+                return None
+            logger.warning(f"Band {band_number} not found in reflectance data")
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving band {band_number}: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return None
+
+
     def _process_vnir_only(self, vnir_file: Optional[Path], options: Dict, report_file: Path) -> bool:
         """
         Process ASTER data in VNIR-only mode

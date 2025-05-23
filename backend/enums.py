@@ -14,8 +14,6 @@ class AlterationIndices(Enum):
     SILICIFICATION = "silicification"
     IRON_ALTERATION = "iron_alteration"
     GOSSAN = "gossan"
-    
-    # New alteration types
     SULFIDE_ALTERATION = "sulfide_alteration"
     CHLORITE_EPIDOTE = "chlorite_epidote"
     SERICITE_PYRITE = "sericite_pyrite"
@@ -56,6 +54,14 @@ class GoldPathfinderIndices(Enum):
     PROPYLITIC_GOLD = "propylitic_gold"
     ARGILLIC_GOLD = "argillic_gold"
     ADVANCED_ARGILLIC_GOLD = "advanced_argillic_gold"
+
+class MineralIndices(Enum):
+    """Mineral indices for ASTER mapping"""
+    ALUNITE = "alunite"
+    KAOLINITE = "kaolinite"
+    CALCITE = "calcite"
+    CHLORITE = "chlorite"
+    IRON_OXIDE = "iron_oxide"
 
 class ProcessingStages(Enum):
     """Processing stages for ASTER data"""

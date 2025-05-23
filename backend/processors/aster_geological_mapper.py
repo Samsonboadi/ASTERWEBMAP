@@ -261,99 +261,167 @@ class ASTER_Geological_Mapper:
         
         logger.info(f"Saved {alteration_type.value} map to {output_file}")
 
-    def calculate_alteration_index(self, alteration_type: AlterationIndices,
-                                 enhanced_processing: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+
+    def get_required_bands(self, combo_type: BandCombinations) -> List[int]:
         """
-        Calculate alteration index with enhanced processing
+        Get the list of required bands for a specific band combination
         
         Parameters:
         -----------
-        alteration_type : AlterationIndices
-            Type of alteration to map
-        enhanced_processing : bool
-            Whether to apply enhanced processing algorithms
+        combo_type : BandCombinations
+            Type of band combination
             
         Returns:
         --------
-        Tuple[np.ndarray, np.ndarray]
-            Alteration index array and confidence map
+        List[int]
+            List of required band numbers
         """
-        if alteration_type not in self.alteration_indices:
-            raise ValueError(f"Unsupported alteration type: {alteration_type}")
-            
-        alteration_info = self.alteration_indices[alteration_type]
-        ratios = alteration_info['ratios']
-        threshold = alteration_info['threshold']
+        if combo_type.value not in self.combinations:
+            logger.warning(f"Unknown combination type: {combo_type.value}")
+            return []
         
-        # Initialize output arrays
-        first_band = next(iter(self.reflectance_data.values()))
-        result = np.zeros_like(first_band, dtype=np.float32)
-        confidence = np.zeros_like(first_band, dtype=np.float32)
+        combo_info = self.combinations[combo_type.value]
+        required_bands = []
         
-        # Calculate band ratios
-        ratio_results = []
-        for band1, band2 in ratios:
-            if band1 not in self.reflectance_data or band2 not in self.reflectance_data:
-                raise ValueError(f"Missing required bands {band1} or {band2}")
-                
-            b1 = self.reflectance_data[band1]
-            b2 = self.reflectance_data[band2]
-            
-            # Check for invalid data
-            if b1 is None or b2 is None or not np.any(b1) or not np.any(b2) or np.all(np.isnan(b1)) or np.all(np.isnan(b2)):
-                logger.warning(f"Invalid data in bands {band1} or {band2}")
-                return np.zeros_like(b1), np.zeros_like(b1)
-            
-            # Calculate ratio where both bands have valid data
-            valid_mask = (b1 > 0) & (b2 > 0) & ~np.isnan(b1) & ~np.isnan(b2)
-            ratio = np.zeros_like(b1)
-            ratio[valid_mask] = b1[valid_mask] / b2[valid_mask]
-            
-            if enhanced_processing:
-                # Apply noise reduction
-                ratio = ndimage.gaussian_filter(ratio, sigma=1)
-                
-                # Enhance contrast
-                valid_ratio = ratio[valid_mask]
-                if len(valid_ratio) > 0:
-                    p2, p98 = np.percentile(valid_ratio, [2, 98])
-                    ratio[valid_mask] = exposure.rescale_intensity(
-                        ratio[valid_mask], in_range=(p2, p98)
-                    )
-            
-            ratio_results.append(ratio)
-        
-        # Combine ratios with PCA if enhanced processing
-        if enhanced_processing and len(ratio_results) > 1:
-            # Reshape for PCA
-            data = np.stack(ratio_results, axis=-1)
-            valid_mask = ~np.isnan(data).any(axis=-1)
-            shape = data.shape
-            
-            # Apply PCA
-            data_2d = data[valid_mask].reshape(-1, len(ratio_results))
-            pca = PCA(n_components=1)
-            transformed = pca.fit_transform(data_2d)
-            
-            # Reshape back
-            result = np.zeros(shape[:-1])
-            result[valid_mask] = transformed.ravel()
-            
-            # Calculate confidence based on explained variance
-            confidence[valid_mask] = pca.explained_variance_ratio_[0]
+        if combo_info['is_ratio']:
+            # For ratio-based combinations, we need both numerator and denominator bands
+            for band1, band2 in combo_info['bands']:
+                required_bands.extend([band1, band2])
         else:
-            # Simple averaging if not using enhanced processing
-            for ratio in ratio_results:
-                result += ratio
-            result /= len(ratios)
-            
-            # Calculate confidence based on ratio consistency
-            confidence = 1 - np.std(ratio_results, axis=0)
+            # For direct band combinations, we need all bands
+            required_bands.extend(combo_info['bands'])
         
-        # Apply threshold
-        result[confidence < threshold] = 0
-        
-        return result, confidence
+        return list(set(required_bands))  # Remove duplicates
+
+
+    def calculate_alteration_index(self, alteration_type):
+        """
+        Calculate the alteration index and confidence map for a given alteration type.
+
+        Parameters:
+        -----------
+        alteration_type : AlterationIndices
+            The type of alteration to calculate
+
+        Returns:
+        --------
+        tuple
+            (index_map, confidence_map) - The calculated index map and confidence map, or (None, None) if unsupported
+        """
+        try:
+            # Initialize maps
+            index_map = None
+            confidence_map = None
+
+            # Ensure base_processor is available
+            if not hasattr(self, 'base_processor') or self.base_processor is None:
+                logger.error("Base processor not initialized")
+                return None, None
+
+            # Get necessary bands
+            if alteration_type == AlterationIndices.ADVANCED_ARGILLIC:
+                band4 = self.base_processor.get_band_data(4)
+                band6 = self.base_processor.get_band_data(6)
+                if band4 is None or band6 is None:
+                    logger.warning(f"Required bands (4, 6) not available for {alteration_type}")
+                    return None, None
+                index_map = band4 / band6  # AlOH absorption
+                confidence_map = np.ones_like(index_map) * 0.9
+
+            elif alteration_type == AlterationIndices.PROPYLITIC:
+                band7 = self.base_processor.get_band_data(7)
+                band8 = self.base_processor.get_band_data(8)
+                if band7 is None or band8 is None:
+                    logger.warning(f"Required bands (7, 8) not available for {alteration_type}")
+                    return None, None
+                index_map = band7 / band8  # MgOH-related
+                confidence_map = np.ones_like(index_map) * 0.85
+
+            elif alteration_type == AlterationIndices.PHYLLIC:
+                band5 = self.base_processor.get_band_data(5)
+                band7 = self.base_processor.get_band_data(7)
+                if band5 is None or band7 is None:
+                    logger.warning(f"Required bands (5, 7) not available for {alteration_type}")
+                    return None, None
+                index_map = band5 / band7  # Sericite-related
+                confidence_map = np.ones_like(index_map) * 0.8
+
+            elif alteration_type == AlterationIndices.SILICIFICATION:
+                band4 = self.base_processor.get_band_data(4)
+                band8 = self.base_processor.get_band_data(8)
+                if band4 is None or band8 is None:
+                    logger.warning(f"Required bands (4, 8) not available for {alteration_type}")
+                    return None, None
+                index_map = band4 / band8  # Quartz-related
+                confidence_map = np.ones_like(index_map) * 0.85
+
+            elif alteration_type == AlterationIndices.IRON_ALTERATION:
+                band2 = self.base_processor.get_band_data(2)
+                band1 = self.base_processor.get_band_data(1)
+                if band2 is None or band1 is None:
+                    logger.warning(f"Required bands (2, 1) not available for {alteration_type}")
+                    return None, None
+                index_map = band2 / band1  # Iron oxide ratio
+                confidence_map = np.ones_like(index_map) * 0.75
+
+            elif alteration_type == AlterationIndices.GOSSAN:
+                band2 = self.base_processor.get_band_data(2)
+                band1 = self.base_processor.get_band_data(1)
+                if band2 is None or band1 is None:
+                    logger.warning(f"Required bands (2, 1) not available for {alteration_type}")
+                    return None, None
+                index_map = band2 / band1  # Iron-rich alteration
+                confidence_map = np.ones_like(index_map) * 0.75
+
+            elif alteration_type == AlterationIndices.SULFIDE_ALTERATION:
+                band4 = self.base_processor.get_band_data(4)
+                band6 = self.base_processor.get_band_data(6)
+                if band4 is None or band6 is None:
+                    logger.warning(f"Required bands (4, 6) not available for {alteration_type}")
+                    return None, None
+                index_map = band4 / band6  # Sulfide-related
+                confidence_map = np.ones_like(index_map) * 0.7
+
+            elif alteration_type == AlterationIndices.CHLORITE_EPIDOTE:
+                band7 = self.base_processor.get_band_data(7)
+                band8 = self.base_processor.get_band_data(8)
+                if band7 is None or band8 is None:
+                    logger.warning(f"Required bands (7, 8) not available for {alteration_type}")
+                    return None, None
+                index_map = band7 / band8  # Chlorite-epidote
+                confidence_map = np.ones_like(index_map) * 0.8
+
+            elif alteration_type == AlterationIndices.SERICITE_PYRITE:
+                band5 = self.base_processor.get_band_data(5)
+                band7 = self.base_processor.get_band_data(7)
+                if band5 is None or band7 is None:
+                    logger.warning(f"Required bands (5, 7) not available for {alteration_type}")
+                    return None, None
+                index_map = band5 / band7  # Sericite with sulfides
+                confidence_map = np.ones_like(index_map) * 0.75
+
+            elif alteration_type == AlterationIndices.CARBONATE_ALTERATION:
+                band6 = self.base_processor.get_band_data(6)
+                band8 = self.base_processor.get_band_data(8)
+                if band6 is None or band8 is None:
+                    logger.warning(f"Required bands (6, 8) not available for {alteration_type}")
+                    return None, None
+                index_map = band6 / band8  # Carbonate-related
+                confidence_map = np.ones_like(index_map) * 0.8
+
+            else:
+                logger.warning(f"Skipping unsupported alteration type: {alteration_type}")
+                return None, None
+
+            if index_map is None or confidence_map is None:
+                logger.warning(f"Failed to calculate index for {alteration_type}")
+                return None, None
+
+            return index_map, confidence_map
+
+        except Exception as e:
+            logger.error(f"Error calculating alteration index for {alteration_type}: {str(e)}")
+            return None, None
 
     def detect_geological_features(self, feature_type: GeologicalFeatures,
                                     band_number: int = 4) -> np.ndarray:
@@ -542,14 +610,19 @@ class ASTER_Geological_Mapper:
         # Verify metadata and bounds
         if not hasattr(self, 'metadata') or not self.metadata:
             logger.error(f"Missing metadata for {combo_type.value}")
-            raise ValueError(f"Missing metadata for {combo_type.value}")
+            return  # Return early instead of raising exception
             
         if not hasattr(self.metadata, 'bounds') or not self.metadata.bounds:
             logger.error(f"Missing bounds in metadata for {combo_type.value}")
-            raise ValueError(f"Missing bounds in metadata for {combo_type.value}")
+            return  # Return early instead of raising exception
             
         # Print the existing bounds for debugging
         logger.info(f"Bounds for {combo_type.value}: {self.metadata.bounds.__dict__ if hasattr(self.metadata.bounds, '__dict__') else self.metadata.bounds}")
+        
+        # Ensure this combo type exists in our combinations dictionary
+        if combo_type.value not in self.combinations:
+            logger.error(f"Unknown combination type: {combo_type.value}")
+            return
         
         combo_info = self.combinations[combo_type.value]
         output_file = output_dir / f"{combo_type.value}_composite.tif"
@@ -559,159 +632,267 @@ class ASTER_Geological_Mapper:
             bounds = self.metadata.bounds
             crs = CRS.from_epsg(4326)
             
-            rgb = np.zeros((self.reflectance_data[4].shape[0], 
-                          self.reflectance_data[4].shape[1], 3), dtype=np.float32)
+            # Find a reference band to determine the shape
+            reference_band = None
+            for band in [4, 1, 3, 2, 5]:  # Try these bands in order
+                if band in self.reflectance_data and self.reflectance_data[band] is not None:
+                    if np.any(~np.isnan(self.reflectance_data[band])):
+                        reference_band = band
+                        break
+            
+            if reference_band is None:
+                logger.error(f"No valid reference band found for {combo_type.value}")
+                return
+                
+            rgb = np.zeros((self.reflectance_data[reference_band].shape[0], 
+                        self.reflectance_data[reference_band].shape[1], 3), dtype=np.float32)
             nodata = -9999
             
             if combo_info['is_ratio']:
                 # Handle ratio-based combinations (e.g., LITHOLOGICAL, CROSTA)
                 ratio_pairs = combo_info['bands']  # List of (num, den) tuples
                 if len(ratio_pairs) != 3:
-                    raise ValueError(f"Expected 3 ratio pairs for {combo_type.value}, got {len(ratio_pairs)}")
+                    logger.warning(f"Expected 3 ratio pairs for {combo_type.value}, got {len(ratio_pairs)}")
+                    return
                 
+                # Validate all required bands first
+                all_bands_valid = True
                 for i, (num_band, den_band) in enumerate(ratio_pairs):
                     if num_band not in self.reflectance_data or den_band not in self.reflectance_data:
                         logger.warning(f"Missing band data for {num_band} or {den_band}")
-                        return
+                        all_bands_valid = False
+                        break
                     
                     numerator = self.reflectance_data[num_band]
                     denominator = self.reflectance_data[den_band]
                     
+                    if numerator is None or denominator is None:
+                        logger.warning(f"Band data is None for {num_band} or {den_band}")
+                        all_bands_valid = False
+                        break
+                        
                     valid_mask = (numerator > 0) & (denominator > 0) & ~np.isnan(numerator) & ~np.isnan(denominator)
-                    if not np.any(valid_mask):
-                        logger.warning(f"Invalid data in bands {num_band} or {den_band} for {combo_type.value}")
-                        return
+                    valid_pixel_count = np.sum(valid_mask)
+                    total_pixels = numerator.size
+                    valid_percentage = (valid_pixel_count / total_pixels) * 100
                     
+                    logger.info(f"Band {num_band}/{den_band} has {valid_pixel_count} valid pixels ({valid_percentage:.2f}%)")
+                    
+                    if valid_pixel_count < (total_pixels * 0.05):  # Require at least 5% valid pixels
+                        logger.warning(f"Insufficient valid data in bands {num_band}/{den_band} for {combo_type.value} (only {valid_percentage:.2f}% valid)")
+                        all_bands_valid = False
+                        break
+                
+                if not all_bands_valid:
+                    logger.warning(f"Skipping {combo_type.value} due to invalid band data")
+                    return
+                    
+                # Now process the data since all bands are valid
+                for i, (num_band, den_band) in enumerate(ratio_pairs):
+                    numerator = self.reflectance_data[num_band]
+                    denominator = self.reflectance_data[den_band]
+                    
+                    valid_mask = (numerator > 0) & (denominator > 0) & ~np.isnan(numerator) & ~np.isnan(denominator)
                     ratio = np.zeros_like(numerator, dtype=np.float32)
                     ratio[valid_mask] = numerator[valid_mask] / denominator[valid_mask]
                     
+                    # Clean up any invalid results from division
+                    ratio[~np.isfinite(ratio)] = 0
+                    
                     if np.any(valid_mask):
-                        p2, p98 = np.percentile(ratio[valid_mask], [2, 98])
-                        ratio = np.clip((ratio - p2) / (p98 - p2), 0, 1)
+                        # Use robust percentile calculation to handle outliers
+                        try:
+                            p2, p98 = np.percentile(ratio[valid_mask], [2, 98])
+                            if p98 > p2:
+                                ratio = np.clip((ratio - p2) / (p98 - p2), 0, 1)
+                            else:
+                                logger.warning(f"Invalid percentile range for {num_band}/{den_band}: p2={p2}, p98={p98}")
+                                ratio = np.zeros_like(ratio)
+                        except Exception as e:
+                            logger.error(f"Error calculating percentiles for {num_band}/{den_band}: {str(e)}")
+                            ratio = np.zeros_like(ratio)
                     
                     rgb[:, :, i] = ratio
+                    
             else:
                 # Handle direct band combinations (e.g., GENERAL_ALTERATION, IRON_OXIDE)
                 bands = combo_info['bands']
                 if len(bands) != 3:
-                    raise ValueError(f"Expected 3 bands for {combo_type.value}, got {len(bands)}")
+                    logger.warning(f"Expected 3 bands for {combo_type.value}, got {len(bands)}")
+                    return
                 
+                # Validate all required bands first
+                all_bands_valid = True
                 for i, band in enumerate(bands):
                     if band not in self.reflectance_data:
                         logger.warning(f"Missing band data for {band}")
-                        return
+                        all_bands_valid = False
+                        break
                     
                     band_data = self.reflectance_data[band]
+                    
+                    if band_data is None:
+                        logger.warning(f"Band data is None for {band}")
+                        all_bands_valid = False
+                        break
+                        
                     valid_mask = ~np.isnan(band_data)
-                    if not np.any(valid_mask):
-                        logger.warning(f"Invalid data in band {band} for {combo_type.value}")
-                        return
+                    valid_pixel_count = np.sum(valid_mask)
+                    total_pixels = band_data.size
+                    valid_percentage = (valid_pixel_count / total_pixels) * 100
                     
-                    if np.any(valid_mask):
-                        p2, p98 = np.percentile(band_data[valid_mask], [2, 98])
-                        band_data = np.clip((band_data - p2) / (p98 - p2), 0, 1)
+                    logger.info(f"Band {band} has {valid_pixel_count} valid pixels ({valid_percentage:.2f}%)")
                     
-                    rgb[:, :, i] = band_data
+                    if valid_pixel_count < (total_pixels * 0.05):  # Require at least 5% valid pixels
+                        logger.warning(f"Insufficient valid data in band {band} for {combo_type.value} (only {valid_percentage:.2f}% valid)")
+                        all_bands_valid = False
+                        break
+                
+                if not all_bands_valid:
+                    logger.warning(f"Skipping {combo_type.value} due to invalid band data")
+                    return
                     
-                # Save iron_oxide and mgoh_carbonate as individual maps
+                # Now process the data since all bands are valid
+                for i, band in enumerate(bands):
+                    band_data = self.reflectance_data[band]
+                    valid_mask = ~np.isnan(band_data)
+                    
+                    # Use robust percentile calculation
+                    try:
+                        if np.any(valid_mask):
+                            p2, p98 = np.percentile(band_data[valid_mask], [2, 98])
+                            if p98 > p2:
+                                normalized_data = np.clip((band_data - p2) / (p98 - p2), 0, 1)
+                            else:
+                                logger.warning(f"Invalid percentile range for band {band}: p2={p2}, p98={p98}")
+                                normalized_data = np.zeros_like(band_data)
+                        else:
+                            normalized_data = np.zeros_like(band_data)
+                    except Exception as e:
+                        logger.error(f"Error calculating percentiles for band {band}: {str(e)}")
+                        normalized_data = np.zeros_like(band_data)
+                    
+                    rgb[:, :, i] = normalized_data
+                    
+                # Save iron_oxide and mgoh_carbonate as individual maps if requested
                 if combo_type == BandCombinations.IRON_OXIDE:
-                    iron_file = output_dir / "iron_oxide.tif"
-                    iron_data = rgb[:, :, 0]  # Band 2 as primary indicator
-                    transform = from_bounds(
-                        bounds.west, bounds.south,
-                        bounds.east, bounds.north,
-                        iron_data.shape[1], iron_data.shape[0]
-                    )
+                    try:
+                        iron_file = output_dir / "iron_oxide.tif"
+                        iron_data = rgb[:, :, 0]  # Band 2 as primary indicator
+                        transform = from_bounds(
+                            bounds.west, bounds.south,
+                            bounds.east, bounds.north,
+                            iron_data.shape[1], iron_data.shape[0]
+                        )
+                        
+                        with rasterio.open(
+                            iron_file,
+                            'w',
+                            driver='GTiff',
+                            height=iron_data.shape[0],
+                            width=iron_data.shape[1],
+                            count=1,
+                            dtype=iron_data.dtype,
+                            crs=crs,
+                            transform=transform,
+                            nodata=nodata,
+                            compress='LZW'
+                        ) as dst:
+                            dst.write(iron_data, 1)
+                            dst.set_band_description(1, "Iron Oxide Index (Band 2)")
+                            if self.metadata:
+                                dst.update_tags(
+                                    description="Iron oxide individual map",
+                                    acquisition_date=self.metadata.acquisition_date
+                                )
+                        logger.info(f"Saved iron_oxide.tif with correct georeferencing to {iron_file}")
+                    except Exception as e:
+                        logger.error(f"Error saving iron_oxide.tif: {str(e)}")
                     
-                    with rasterio.open(
-                        iron_file,
-                        'w',
-                        driver='GTiff',
-                        height=iron_data.shape[0],
-                        width=iron_data.shape[1],
-                        count=1,
-                        dtype=iron_data.dtype,
-                        crs=crs,
-                        transform=transform,
-                        nodata=nodata,
-                        compress='LZW'
-                    ) as dst:
-                        dst.write(iron_data, 1)
-                        dst.set_band_description(1, "Iron Oxide Index (Band 2)")
-                        if self.metadata:
-                            dst.update_tags(
-                                description="Iron oxide individual map",
-                                acquisition_date=self.metadata.acquisition_date
-                            )
-                    logger.info(f"Saved iron_oxide.tif with correct georeferencing to {iron_file}")
-                
                 elif combo_type == BandCombinations.MGOH_CARBONATE:
-                    mgoh_file = output_dir / "mgoh_carbonate.tif"
-                    mgoh_data = rgb[:, :, 1]  # Band 7 as primary indicator
-                    transform = from_bounds(
-                        bounds.west, bounds.south,
-                        bounds.east, bounds.north,
-                        mgoh_data.shape[1], mgoh_data.shape[0]
-                    )
-                    
-                    with rasterio.open(
-                        mgoh_file,
-                        'w',
-                        driver='GTiff',
-                        height=mgoh_data.shape[0],
-                        width=mgoh_data.shape[1],
-                        count=1,
-                        dtype=mgoh_data.dtype,
-                        crs=crs,
-                        transform=transform,
-                        nodata=nodata,
-                        compress='LZW'
-                    ) as dst:
-                        dst.write(mgoh_data, 1)
-                        dst.set_band_description(1, "Mg-OH/Carbonate Index (Band 7)")
-                        if self.metadata:
-                            dst.update_tags(
-                                description="Mg-OH and carbonate individual map",
-                                acquisition_date=self.metadata.acquisition_date
-                            )
-                    logger.info(f"Saved mgoh_carbonate.tif with correct georeferencing to {mgoh_file}")
+                    try:
+                        mgoh_file = output_dir / "mgoh_carbonate.tif"
+                        mgoh_data = rgb[:, :, 1]  # Band 7 as primary indicator
+                        transform = from_bounds(
+                            bounds.west, bounds.south,
+                            bounds.east, bounds.north,
+                            mgoh_data.shape[1], mgoh_data.shape[0]
+                        )
+                        
+                        with rasterio.open(
+                            mgoh_file,
+                            'w',
+                            driver='GTiff',
+                            height=mgoh_data.shape[0],
+                            width=mgoh_data.shape[1],
+                            count=1,
+                            dtype=mgoh_data.dtype,
+                            crs=crs,
+                            transform=transform,
+                            nodata=nodata,
+                            compress='LZW'
+                        ) as dst:
+                            dst.write(mgoh_data, 1)
+                            dst.set_band_description(1, "Mg-OH/Carbonate Index (Band 7)")
+                            if self.metadata:
+                                dst.update_tags(
+                                    description="Mg-OH and carbonate individual map",
+                                    acquisition_date=self.metadata.acquisition_date
+                                )
+                        logger.info(f"Saved mgoh_carbonate.tif with correct georeferencing to {mgoh_file}")
+                    except Exception as e:
+                        logger.error(f"Error saving mgoh_carbonate.tif: {str(e)}")
             
-            # Save composite map
-            transform = from_bounds(
-                bounds.west, bounds.south,
-                bounds.east, bounds.north,
-                rgb.shape[1], rgb.shape[0]
-            )
-            
-            with rasterio.open(
-                output_file,
-                'w',
-                driver='GTiff',
-                height=rgb.shape[0],
-                width=rgb.shape[1],
-                count=3,
-                dtype=rgb.dtype,
-                crs=crs,
-                transform=transform,
-                nodata=nodata,
-                compress='LZW'
-            ) as dst:
-                for i in range(3):
-                    dst.write(rgb[:, :, i], i + 1)
-                dst.descriptions = [combo_info['description']] * 3
+            # Check if we have valid RGB data
+            if not np.any(rgb):
+                logger.warning(f"No valid data in RGB composite for {combo_type.value}")
+                return
                 
-                if self.metadata:
-                    dst.update_tags(
-                        band_combination=combo_type.value,
-                        description=combo_info['description'],
-                        acquisition_date=self.metadata.acquisition_date
-                    )
-            
-            logger.info(f"Saved {combo_type.value}_composite.tif with correct georeferencing to {output_file}")
-            
+            # Save composite map
+            try:
+                transform = from_bounds(
+                    bounds.west, bounds.south,
+                    bounds.east, bounds.north,
+                    rgb.shape[1], rgb.shape[0]
+                )
+                
+                # Replace NaN with nodata value
+                rgb = np.nan_to_num(rgb, nan=nodata)
+                
+                with rasterio.open(
+                    output_file,
+                    'w',
+                    driver='GTiff',
+                    height=rgb.shape[0],
+                    width=rgb.shape[1],
+                    count=3,
+                    dtype=rgb.dtype,
+                    crs=crs,
+                    transform=transform,
+                    nodata=nodata,
+                    compress='LZW'
+                ) as dst:
+                    for i in range(3):
+                        dst.write(rgb[:, :, i], i + 1)
+                    dst.descriptions = [combo_info['description']] * 3
+                    
+                    if self.metadata:
+                        dst.update_tags(
+                            band_combination=combo_type.value,
+                            description=combo_info['description'],
+                            acquisition_date=self.metadata.acquisition_date
+                        )
+                
+                logger.info(f"Saved {combo_type.value}_composite.tif with correct georeferencing to {output_file}")
+                
+            except Exception as e:
+                logger.error(f"Error saving composite file: {str(e)}")
+                logger.error(f"Stack trace: {traceback.format_exc()}")
+                
         except Exception as e:
             logger.error(f"Error creating {combo_type.value} composite and individual maps: {str(e)}")
-            raise
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+
 
     def create_enhanced_sulfide_map(self, output_dir: Path, threshold: float = 0.65):
         """

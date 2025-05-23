@@ -14,9 +14,10 @@ from enum import Enum
 from scipy.ndimage import zoom
 from dataclasses import dataclass
 from netCDF4 import Dataset
+import matplotlib.pyplot as plt
 import re
 from datetime import datetime
-
+from enums import MineralIndices, GoldPathfinderIndices  # Ensure this import is present
 # Set up global logging
 logging.basicConfig(
     level=logging.INFO,
@@ -628,55 +629,111 @@ class ASTER_L2_Processor:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             raise RuntimeError(f"Error loading data: {str(e)}")
 
-    def validate_data(self, mineral: MineralIndices) -> bool:
+    def validate_data(self, mineral):
         """
-        Validate that all required bands are available for mineral calculation
+        Validate that the required bands for a mineral or pathfinder index are available.
 
         Parameters:
         -----------
-        mineral : MineralIndices
-            The mineral index to validate
+        mineral : MineralIndices or GoldPathfinderIndices
+            The mineral or pathfinder index to validate
 
         Returns:
         --------
         bool
-            True if all required data is available and valid
+            True if data is valid, False otherwise
         """
         try:
-            if mineral not in self.mineral_indices:
-                logger.error(f"Invalid mineral type: {mineral}")
+            required_bands = []
+            
+            if isinstance(mineral, MineralIndices):
+                if mineral == MineralIndices.ALUNITE:
+                    required_bands = [4, 5, 6]
+                elif mineral == MineralIndices.KAOLINITE:
+                    required_bands = [4, 5, 6]
+                elif mineral == MineralIndices.CALCITE:
+                    required_bands = [6, 8]
+                elif mineral == MineralIndices.CHLORITE:
+                    required_bands = [7, 8]
+                elif mineral == MineralIndices.IRON_OXIDE:
+                    required_bands = [1, 2]
+                elif mineral == MineralIndices.DOLOMITE:
+                    required_bands = [6, 8]  # Carbonate-related
+                elif mineral == MineralIndices.EPIDOTE:
+                    required_bands = [7, 8]  # MgOH-related
+                elif mineral == MineralIndices.MUSCOVITE:
+                    required_bands = [5, 7]  # Sericite-related
+                elif mineral == MineralIndices.ILLITE:
+                    required_bands = [5, 6]  # Clay-related
+                elif mineral == MineralIndices.FERROUS_IRON:
+                    required_bands = [1, 2]  # Iron-related
+                elif mineral == MineralIndices.FERRIC_OXIDE:
+                    required_bands = [1, 2]  # Iron oxide
+                elif mineral == MineralIndices.HYDROXYL:
+                    required_bands = [4, 6]  # AlOH-related
+                elif mineral == MineralIndices.PEGMATITE:
+                    required_bands = [4, 8]  # Quartz-related
+                elif mineral == MineralIndices.SPODUMENE:
+                    required_bands = [4, 8]  # Lithium-related
+                elif mineral == MineralIndices.LABRADORITE:
+                    required_bands = [4, 8]  # Feldspar-related
+                elif mineral == MineralIndices.FELDSPAR:
+                    required_bands = [4, 8]  # Feldspar
+                elif mineral == MineralIndices.PYRITE:
+                    required_bands = [2, 1]  # Sulfide-related
+                elif mineral == MineralIndices.CHALCOPYRITE:
+                    required_bands = [2, 1]  # Sulfide-related
+                elif mineral == MineralIndices.SPHALERITE:
+                    required_bands = [2, 1]  # Sulfide-related
+                elif mineral == MineralIndices.GALENA:
+                    required_bands = [2, 1]  # Sulfide-related
+                elif mineral == MineralIndices.SERICITE:
+                    required_bands = [5, 7]  # Sericite
+                elif mineral == MineralIndices.CARBONATE:
+                    required_bands = [6, 8]  # Carbonate
+                else:
+                    logger.warning(f"Unsupported mineral type: {mineral}")
+                    return False
+
+            elif isinstance(mineral, GoldPathfinderIndices):
+                if mineral == GoldPathfinderIndices.GOLD_ALTERATION:
+                    required_bands = [4, 6]
+                elif mineral == GoldPathfinderIndices.QUARTZ_ADULARIA:
+                    required_bands = [4, 8]
+                elif mineral == GoldPathfinderIndices.PYRITE:
+                    required_bands = [2, 1]
+                elif mineral == GoldPathfinderIndices.ARSENOPYRITE:
+                    required_bands = [2, 1]
+                elif mineral == GoldPathfinderIndices.SILICA:
+                    required_bands = [4, 8]
+                elif mineral == GoldPathfinderIndices.PROPYLITIC_GOLD:
+                    required_bands = [7, 8]
+                elif mineral == GoldPathfinderIndices.ARGILLIC_GOLD:
+                    required_bands = [4, 5]
+                elif mineral == GoldPathfinderIndices.ADVANCED_ARGILLIC_GOLD:
+                    required_bands = [4, 6]
+                else:
+                    logger.warning(f"Unsupported pathfinder type: {mineral}")
+                    return False
+            else:
+                logger.error(f"Unsupported index type: {type(mineral)}")
                 return False
 
-            mineral_info = self.mineral_indices[mineral]
-            required_bands = set()
-            for band1, band2 in mineral_info['ratios']:
-                required_bands.add(band1)
-                required_bands.add(band2)
-
-            missing_bands = [band for band in required_bands if band not in self.reflectance_data]
-            if missing_bands:
-                logger.error(f"Missing required bands for {mineral.value}: {missing_bands}")
-                logger.error(f"Available bands: {list(self.reflectance_data.keys())}")
-                return False
-
-            first_shape = None
-            mismatched_bands = []
-            for band in self.reflectance_data:
-                shape = self.reflectance_data[band].shape
-                if first_shape is None:
-                    first_shape = shape
-                elif shape != first_shape:
-                    mismatched_bands.append((band, shape))
-
-            if mismatched_bands:
-                logger.error(f"Mismatched band shapes. Expected {first_shape}, got: {mismatched_bands}")
-                return False
+            for band in required_bands:
+                band_data = self.get_band_data(band)
+                if band_data is None:
+                    logger.warning(f"Band {band} not found for {mineral}")
+                    return False
+                valid_mask = ~np.isnan(band_data)
+                valid_pixel_count = np.sum(valid_mask)
+                if valid_pixel_count < (band_data.size * 0.05):
+                    logger.warning(f"Insufficient valid data for band {band} in {mineral}")
+                    return False
 
             return True
 
         except Exception as e:
-            logger.error(f"Error validating data: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
+            logger.error(f"Error validating data for {mineral}: {str(e)}")
             return False
 
     def resample_data(self):
@@ -839,76 +896,189 @@ class ASTER_L2_Processor:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             pass
 
-    def calculate_mineral_index(self, mineral: MineralIndices) -> Tuple[np.ndarray, np.ndarray]:
-        """Calculate mineral index and confidence map"""
-        if not self.validate_data(mineral):
-            raise ValueError(f"Data validation failed for {mineral.value}")
+
+def calculate_mineral_index(self, mineral: MineralIndices):
+    """
+    Calculate the mineral index and confidence map for a given mineral type.
+
+    Parameters:
+    -----------
+    mineral : MineralIndices
+        The mineral index to calculate
+
+    Returns:
+    --------
+    tuple
+        (index_map, confidence_map) - The calculated index map and confidence map
+    """
+    try:
+        index_map = None
+        confidence_map = None
+
+        # Check if the mineral is defined in mineral_indices
+        if mineral not in self.mineral_indices:
+            logger.warning(f"Unsupported mineral type: {mineral}")
+            return None, None
 
         mineral_info = self.mineral_indices[mineral]
         ratios = mineral_info['ratios']
         threshold = mineral_info['threshold']
 
-        first_band = self.reflectance_data[ratios[0][0]]
-        result = np.zeros_like(first_band, dtype=np.float32)
-        confidence = np.zeros_like(first_band, dtype=np.float32)
+        # Compute the index by averaging multiple band ratios
+        ratio_maps = []
+        valid_ratio_masks = []
+        for band_num, band_den in ratios:
+            num_data = self.get_band_data(band_num)
+            den_data = self.get_band_data(band_den)
+            if num_data is None or den_data is None:
+                logger.warning(f"Required bands ({band_num}, {band_den}) not available for {mineral}")
+                return None, None
 
-        ratio_results = []
-        for band1, band2 in ratios:
-            b1 = self.reflectance_data[band1]
-            b2 = self.reflectance_data[band2]
+            logger.info(f"Band {band_num} stats for {mineral} - Min: {np.nanmin(num_data):.3f}, Max: {np.nanmax(num_data):.3f}, Mean: {np.nanmean(num_data):.3f}, NaN count: {np.sum(np.isnan(num_data))}")
+            logger.info(f"Band {band_den} stats for {mineral} - Min: {np.nanmin(den_data):.3f}, Max: {np.nanmax(den_data):.3f}, Mean: {np.nanmean(den_data):.3f}, NaN count: {np.sum(np.isnan(den_data))}")
 
-            valid_mask = (b1 > 0) & (b2 > 0) & ~np.isnan(b1) & ~np.isnan(b2)
-            ratio = np.zeros_like(b1)
+            # Mask zeros and NaN values in the denominator
+            valid_mask = (den_data != 0) & ~np.isnan(den_data) & ~np.isnan(num_data)
+            if not np.any(valid_mask):
+                logger.warning(f"No valid pixels for band ratio ({band_num}/{band_den}) for {mineral} after masking")
+                return None, None
 
-            if np.any(valid_mask):
-                ratio[valid_mask] = b1[valid_mask] / b2[valid_mask]
-                ratio_valid = ratio[valid_mask]
+            ratio_map = np.full_like(num_data, np.nan, dtype=np.float32)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ratio_map[valid_mask] = num_data[valid_mask] / den_data[valid_mask]
 
-                if len(ratio_valid) > 0:
-                    p2, p98 = np.percentile(ratio_valid, [2, 98])
-                    if p98 > p2:
-                        ratio[valid_mask] = np.clip((ratio[valid_mask] - p2) / (p98 - p2), 0, 1)
+            # Exclude inf values
+            valid_ratio_mask = ~np.isnan(ratio_map) & ~np.isinf(ratio_map)
+            if not np.any(valid_ratio_mask):
+                logger.warning(f"No valid pixels for band ratio ({band_num}/{band_den}) after excluding inf")
+                return None, None
 
-            ratio_results.append(ratio)
-            logger.info(f"Calculated ratio for bands {band1}/{band2} for {mineral.value}")
+            ratio_maps.append(ratio_map)
+            valid_ratio_masks.append(valid_ratio_mask)
 
-        for ratio in ratio_results:
-            result += ratio
-        result /= len(ratios)
+        # Combine the ratio maps by averaging
+        combined_valid_mask = np.ones_like(ratio_maps[0], dtype=bool)
+        for valid_ratio_mask in valid_ratio_masks:
+            combined_valid_mask &= valid_ratio_mask
 
-        std_dev = np.std(ratio_results, axis=0)
-        max_std = np.nanmax(std_dev)
-        if max_std > 0:
-            confidence = 1 - (std_dev / max_std)
-        else:
-            confidence = np.ones_like(std_dev)
+        if not np.any(combined_valid_mask):
+            logger.warning(f"No valid pixels for {mineral} after combining band ratios")
+            return None, None
 
-        result[confidence < threshold] = 0
+        # Average the ratio maps
+        index_map = np.zeros_like(ratio_maps[0], dtype=np.float32)
+        count_valid = np.zeros_like(index_map, dtype=np.float32)
+        for ratio_map in ratio_maps:
+            valid_pixels = ~np.isnan(ratio_map) & ~np.isinf(ratio_map)
+            index_map[valid_pixels] += ratio_map[valid_pixels]
+            count_valid[valid_pixels] += 1
 
-        logger.info(f"Completed mineral index calculation for {mineral.value}")
-        return result, confidence
+        # Avoid division by zero
+        valid_count = count_valid > 0
+        index_map[valid_count] = index_map[valid_count] / count_valid[valid_count]
+        index_map[~valid_count] = np.nan
 
-    def save_mineral_map(self, mineral: MineralIndices, output_dir: Path):
-        """Generate and save mineral distribution maps as GeoTIFFs"""
+        # Apply threshold to create a continuous index map
+        index_map[~combined_valid_mask] = np.nan
+        confidence_map = np.ones_like(index_map) * mineral_info.get('confidence', 0.9)
+
+        return index_map, confidence_map
+
+    except Exception as e:
+        logger.error(f"Error calculating mineral index for {mineral}: {str(e)}")
+        return None, None
+
+
+
+
+    def get_band_data(self, band_number: int) -> Optional[np.ndarray]:
+        try:
+            if band_number in self.reflectance_data:
+                data = self.reflectance_data[band_number]
+                if np.any(data):
+                    return data
+                logger.warning(f"Band {band_number} contains no valid data")
+                return None
+            logger.warning(f"Band {band_number} not found in reflectance data")
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving band {band_number}: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return None
+
+
+
+    def save_mineral_map(self, mineral, output_dir: Path):
+        """
+        Generate and save mineral or pathfinder distribution maps as GeoTIFFs.
+
+        Parameters:
+        -----------
+        mineral : MineralIndices or GoldPathfinderIndices
+            The mineral or pathfinder index to calculate
+        output_dir : Path
+            Directory to save the GeoTIFF
+        """
         try:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info(f"Processing mineral: {mineral.value}")
 
-            index_map, confidence_map = self.calculate_mineral_index(mineral)
-
-            logger.info(f"Index map stats for {mineral.value} - Min: {np.nanmin(index_map):.3f}, "
-                        f"Max: {np.nanmax(index_map):.3f}, Mean: {np.nanmean(index_map):.3f}")
-            logger.info(f"Confidence map stats for {mineral.value} - Min: {np.nanmin(confidence_map):.3f}, "
-                        f"Max: {np.nanmax(confidence_map):.3f}, Mean: {np.nanmean(confidence_map):.3f}")
-
-            if np.all(np.isnan(index_map)) or np.all(index_map == 0):
-                logger.error(f"Index map for {mineral.value} contains no valid data. Skipping.")
+            if not self.validate_data(mineral):
+                logger.warning(f"Cannot create {mineral.value} map - data validation failed")
                 return
 
-            index_map = np.clip(index_map, 0, 1)
+            # Calculate index map based on whether it's a mineral or pathfinder
+            if isinstance(mineral, MineralIndices):
+                index_map, confidence_map = self.calculate_mineral_index(mineral)
+            elif isinstance(mineral, GoldPathfinderIndices):
+                index_map, confidence_map = self.calculate_pathfinder_index(mineral)
+            else:
+                logger.error(f"Unsupported index type: {type(mineral)}")
+                return
+
+            if index_map is None or confidence_map is None:
+                logger.warning(f"Skipping {mineral.value} map - index calculation failed")
+                return
+
+            # Debug: Log raw index_map and confidence_map statistics
+            logger.info(f"Raw index_map stats for {mineral.value} - Min: {np.nanmin(index_map):.3f}, "
+                        f"Max: {np.nanmax(index_map):.3f}, Mean: {np.nanmean(index_map):.3f}, "
+                        f"NaN count: {np.sum(np.isnan(index_map))}")
+            logger.info(f"Raw confidence_map stats for {mineral.value} - Min: {np.nanmin(confidence_map):.3f}, "
+                        f"Max: {np.nanmax(confidence_map):.3f}, Mean: {np.nanmean(confidence_map):.3f}, "
+                        f"NaN count: {np.sum(np.isnan(confidence_map))}")
+
+            # Check for valid data (exclude NaN and inf)
+            valid_mask = ~np.isnan(index_map) & ~np.isinf(index_map) & (index_map != 0)
+            if not np.any(valid_mask):
+                logger.error(f"Index map for {mineral.value} contains no valid data after masking NaN and inf. Skipping.")
+                return
+
+            # Normalize index_map to [0, 1] range using percentile-based stretching
+            p5, p95 = np.nanpercentile(index_map[valid_mask], [5, 95])
+            if p95 > p5:  # Avoid division by zero
+                index_map = (index_map - p5) / (p95 - p5)
+                index_map = np.clip(index_map, 0, 1)
+            else:
+                logger.warning(f"Index map for {mineral.value} has no range (p5 == p95), setting to 0")
+                index_map = np.zeros_like(index_map)
+
+            # Clip confidence_map to [0, 1]
             confidence_map = np.clip(confidence_map, 0, 1)
+
+            # Debug: Log after normalization
+            logger.info(f"Normalized index_map stats for {mineral.value} - Min: {np.nanmin(index_map):.3f}, "
+                        f"Max: {np.nanmax(index_map):.3f}, Mean: {np.nanmean(index_map):.3f}")
+
+            # Save a raw data visualization for debugging
+            plt.figure(figsize=(8, 8))
+            plt.imshow(index_map, cmap='viridis')
+            plt.colorbar(label='Raw Index Value')
+            plt.title(f'{mineral.value} Raw Data')
+            plt.savefig(output_dir / f"{mineral.value}_raw_data.png", dpi=300)
+            plt.close()
 
             nodata = -9999
             index_map = np.nan_to_num(index_map, nan=nodata)
@@ -932,7 +1102,9 @@ class ASTER_L2_Processor:
                 crs = CRS.from_epsg(4326)
 
             logger.info(f"Applied transform for {mineral.value}: {transform}")
-            logger.info(f"Bounds: W={bounds.west}, E={bounds.east}, S={bounds.south}, N={bounds.north}")
+            if hasattr(self.metadata, 'bounds'):
+                bounds = self.metadata.bounds
+                logger.info(f"Bounds: W={bounds.west}, E={bounds.east}, S={bounds.south}, N={bounds.north}")
             logger.info(f"Shape: {index_map.shape}, CRS: {crs}")
 
             output_file = output_dir / f"{mineral.value}_map.tif"
@@ -955,30 +1127,165 @@ class ASTER_L2_Processor:
                 dst.set_band_description(2, f"{mineral.value} Confidence")
 
                 if self.metadata:
-                    dst.update_tags(
-                        acquisition_date=self.metadata.acquisition_date,
-                        solar_azimuth=str(self.metadata.solar_azimuth),
-                        solar_elevation=str(self.metadata.solar_elevation),
-                        cloud_cover=str(self.metadata.cloud_cover),
-                        mineral_type=mineral.value,
-                        creation_date=datetime.now().isoformat(),
-                        data_range=f"min={np.nanmin(index_map):.3f}, max={np.nanmax(index_map):.3f}"
-                    )
+                    try:
+                        dst.update_tags(
+                            acquisition_date=self.metadata.acquisition_date,
+                            solar_azimuth=str(self.metadata.solar_azimuth),
+                            solar_elevation=str(self.metadata.solar_elevation),
+                            cloud_cover=str(self.metadata.cloud_cover),
+                            mineral_type=mineral.value,
+                            creation_date=datetime.now().isoformat(),
+                            data_range=f"min={np.nanmin(index_map):.3f}, max={np.nanmax(index_map):.3f}"
+                        )
+                    except Exception as tag_e:
+                        logger.error(f"Error adding tags to {mineral.value} map: {str(tag_e)}")
 
-            with rasterio.open(output_file, 'r') as src:
-                saved_transform = src.transform
-                saved_crs = src.crs
-                saved_bounds = src.bounds
-                logger.info(f"Verified saved GeoTIFF for {mineral.value}:")
-                logger.info(f"Transform: {saved_transform}")
-                logger.info(f"CRS: {saved_crs}")
-                logger.info(f"Bounds: {saved_bounds}")
+            try:
+                with rasterio.open(output_file, 'r') as src:
+                    saved_transform = src.transform
+                    saved_crs = src.crs
+                    saved_bounds = src.bounds
+                    logger.info(f"Verified saved GeoTIFF for {mineral.value}:")
+                    logger.info(f"Transform: {saved_transform}")
+                    logger.info(f"CRS: {saved_crs}")
+                    logger.info(f"Bounds: {saved_bounds}")
+            except Exception as verify_e:
+                logger.error(f"Error verifying saved {mineral.value} map: {str(verify_e)}")
 
             logger.info(f"Saved and verified georeferenced GeoTIFF for {mineral.value} to {output_file}")
+            
+            try:
+                plt.figure(figsize=(12, 6))
+                
+                plt.subplot(121)
+                plt.imshow(np.nan_to_num(index_map, nan=0), cmap='viridis')
+                plt.colorbar(label='Index Value')
+                plt.title(f'{mineral.value.title()} Distribution')
+                
+                plt.subplot(122)
+                plt.imshow(np.nan_to_num(confidence_map, nan=0), cmap='RdYlGn')
+                plt.colorbar(label='Confidence')
+                plt.title('Confidence Map')
+                
+                plt.tight_layout()
+                plt.savefig(output_dir / f"{mineral.value}_visualization.png", dpi=300, bbox_inches='tight')
+                plt.close()
+                logger.info(f"Saved visualization for {mineral.value}")
+            except Exception as viz_e:
+                logger.error(f"Error creating visualization for {mineral.value}: {str(viz_e)}")
 
         except Exception as e:
             logger.error(f"Error saving {mineral.value} map: {str(e)}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
+            raise
+
+
+
+    def calculate_pathfinder_index(self, pathfinder: GoldPathfinderIndices):
+        """
+        Calculate the pathfinder index and confidence map for a given gold pathfinder type.
+
+        Parameters:
+        -----------
+        pathfinder : GoldPathfinderIndices
+            The pathfinder index to calculate
+
+        Returns:
+        --------
+        tuple
+            (index_map, confidence_map) - The calculated index map and confidence map
+        """
+        try:
+            index_map = None
+            confidence_map = None
+
+            if pathfinder == GoldPathfinderIndices.GOLD_ALTERATION:
+                band4 = self.get_band_data(4)
+                band6 = self.get_band_data(6)
+                if band4 is None or band6 is None:
+                    logger.warning(f"Required bands (4, 6) not available for {pathfinder}")
+                    return None, None
+                index_map = band4 / band6
+                confidence_map = np.ones_like(index_map) * 0.9
+
+            elif pathfinder == GoldPathfinderIndices.QUARTZ_ADULARIA:
+                band4 = self.get_band_data(4)
+                band8 = self.get_band_data(8)
+                if band4 is None or band8 is None:
+                    logger.warning(f"Required bands (4, 8) not available for {pathfinder}")
+                    return None, None
+                index_map = band4 / band8
+                confidence_map = np.ones_like(index_map) * 0.85
+
+            elif pathfinder == GoldPathfinderIndices.PYRITE:
+                band2 = self.get_band_data(2)
+                band1 = self.get_band_data(1)
+                if band2 is None or band1 is None:
+                    logger.warning(f"Required bands (2, 1) not available for {pathfinder}")
+                    return None, None
+                index_map = band2 / band1
+                confidence_map = np.ones_like(index_map) * 0.75
+
+            elif pathfinder == GoldPathfinderIndices.ARSENOPYRITE:
+                band2 = self.get_band_data(2)
+                band1 = self.get_band_data(1)
+                if band2 is None or band1 is None:
+                    logger.warning(f"Required bands (2, 1) not available for {pathfinder}")
+                    return None, None
+                index_map = band2 / band1
+                confidence_map = np.ones_like(index_map) * 0.75
+
+            elif pathfinder == GoldPathfinderIndices.SILICA:
+                band4 = self.get_band_data(4)
+                band8 = self.get_band_data(8)
+                if band4 is None or band8 is None:
+                    logger.warning(f"Required bands (4, 8) not available for {pathfinder}")
+                    return None, None
+                index_map = band4 / band8
+                confidence_map = np.ones_like(index_map) * 0.85
+
+            elif pathfinder == GoldPathfinderIndices.PROPYLITIC_GOLD:
+                band7 = self.get_band_data(7)
+                band8 = self.get_band_data(8)
+                if band7 is None or band8 is None:
+                    logger.warning(f"Required bands (7, 8) not available for {pathfinder}")
+                    return None, None
+                index_map = band7 / band8
+                confidence_map = np.ones_like(index_map) * 0.8
+
+            elif pathfinder == GoldPathfinderIndices.ARGILLIC_GOLD:
+                band4 = self.get_band_data(4)
+                band5 = self.get_band_data(5)
+                if band4 is None or band5 is None:
+                    logger.warning(f"Required bands (4, 5) not available for {pathfinder}")
+                    return None, None
+                index_map = band4 / band5
+                confidence_map = np.ones_like(index_map) * 0.8
+
+            elif pathfinder == GoldPathfinderIndices.ADVANCED_ARGILLIC_GOLD:
+                band4 = self.get_band_data(4)
+                band6 = self.get_band_data(6)
+                if band4 is None or band6 is None:
+                    logger.warning(f"Required bands (4, 6) not available for {pathfinder}")
+                    return None, None
+                index_map = band4 / band6
+                confidence_map = np.ones_like(index_map) * 0.9
+
+            else:
+                logger.warning(f"Unsupported pathfinder type: {pathfinder}")
+                return None, None
+
+            if index_map is None or confidence_map is None:
+                logger.warning(f"Failed to calculate index for {pathfinder}")
+                return None, None
+
+            return index_map, confidence_map
+
+        except Exception as e:
+            logger.error(f"Error calculating pathfinder index for {pathfinder}: {str(e)}")
+            return None, None
+
+
 
     def get_band_data(self, band_number: int) -> Optional[np.ndarray]:
         """
