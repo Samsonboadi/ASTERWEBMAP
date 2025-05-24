@@ -67,7 +67,6 @@ async function fetchAPI(endpoint, options = {}) {
   }
 }
 
-
 /**
  * Upload a new ASTER data file for processing
  */
@@ -145,9 +144,6 @@ export async function uploadAsterData(file, metadata = {}) {
   }
 }
 
-
-
-
 /**
  * Get scene details by ID
  */
@@ -174,7 +170,6 @@ export async function getSceneById(sceneId) {
 /**
  * Start processing a scene
  */
-
 export async function processScene(sceneId, options) {
   console.log(`Processing scene ${sceneId} with options:`, options);
   try {
@@ -198,7 +193,6 @@ export async function processScene(sceneId, options) {
     throw error;
   }
 }
-
 
 // Helper function to handle backend unavailability
 const handleBackendUnavailable = (error, fallbackData) => {
@@ -264,11 +258,42 @@ export async function getAvailableLayers(sceneId) {
  */
 export function getLayerUrl(sceneId, layerType, layerName) {
   try {
-    return `${API_BASE_URL}/scenes/${sceneId}/layers/${layerType}/${layerName}`;
+    // Map layer types to their directory structure and file suffixes
+    const layerConfig = {
+      'mineral': { dir: 'minerals', suffix: '_map.tif' },
+      'alteration': { dir: 'alteration', suffix: '_map.tif' },
+      'geological': { dir: 'analysis', suffix: '_features.tif' },
+      'band': { dir: 'rgb_composites', suffix: '_composite.tif' },
+      'ratio': { dir: 'analysis', suffix: '_ratio.tif' },
+      'gold': { dir: 'gold_pathfinders', suffix: '_map.tif' },
+      'vnir': { dir: 'minerals', suffix: '_map.tif' } // For VNIR-only products
+    };
+
+    const config = layerConfig[layerType];
+    if (!config) {
+      throw new Error(`Unknown layer type: ${layerType}`);
+    }
+
+    // Special handling for certain layer names
+    let fileName = layerName;
+    if (layerType === 'vnir') {
+      // For VNIR layers, map to appropriate file names
+      const vnirMapping = {
+        'ndvi': 'ndvi',
+        'band1': 'band1_blue',
+        'band2': 'band2_green', 
+        'band3': 'band3_nir'
+      };
+      fileName = vnirMapping[layerName] || layerName;
+    }
+
+    return `${API_BASE_URL}/scenes/${sceneId}/layers/${layerType}/${fileName}`;
   } catch (error) {
-    return handleBackendUnavailable(error, 'https://via.placeholder.com/800x600?text=Layer+Image');
+    console.error(`Error generating layer URL for ${layerType}/${layerName}:`, error);
+    throw error;
   }
 }
+
 /**
  * Generate a prospectivity map
  */
@@ -326,11 +351,103 @@ export async function generateReport(sceneId, reportType, options = {}) {
     });
   }
 }
+
 /**
- * Export a map as GeoTIFF
+ * Export a map as GeoTIFF - Updated to handle different scenarios
  */
 export function exportMap(sceneId, mapType, mapName, format = 'geotiff') {
-  window.open(`${API_BASE_URL}/scenes/${sceneId}/export/${mapType}/${mapName}?format=${format}`, '_blank');
+  try {
+    const url = `${API_BASE_URL}/scenes/${sceneId}/export/${mapType}/${mapName}?format=${format}`;
+    
+    // Create a temporary link to trigger download
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${sceneId}_${mapType}_${mapName}.${format === 'geotiff' ? 'tif' : format}`;
+    link.target = '_blank';
+    
+    // Append to body, click, and remove
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    return { success: true, url };
+  } catch (error) {
+    console.error('Export failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Download scene products as a bundle
+ */
+export async function downloadSceneProducts(sceneId, productTypes = ['all']) {
+  try {
+    // If no specific products requested, try to download common products
+    const defaultProducts = [
+      { type: 'band', name: 'general_alteration' },
+      { type: 'band', name: 'iron_oxide' },
+      { type: 'alteration', name: 'advanced_argillic' },
+      { type: 'alteration', name: 'argillic' },
+      { type: 'gold', name: 'pyrite' }
+    ];
+
+    const downloadPromises = [];
+    
+    for (const product of defaultProducts) {
+      try {
+        const result = exportMap(sceneId, product.type, product.name, 'geotiff');
+        downloadPromises.push(Promise.resolve(result));
+      } catch (error) {
+        console.warn(`Failed to download ${product.type}/${product.name}:`, error);
+        // Continue with other downloads even if one fails
+      }
+    }
+
+    // Wait for all downloads to initiate
+    const results = await Promise.allSettled(downloadPromises);
+    
+    const successful = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+
+    return {
+      success: true,
+      message: `Initiated download of ${successful} products${failed > 0 ? ` (${failed} failed)` : ''}`,
+      successful,
+      failed
+    };
+  } catch (error) {
+    console.error('Bundle download failed:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get available products for download for a scene
+ */
+export async function getAvailableProducts(sceneId) {
+  try {
+    const layers = await getAvailableLayers(sceneId);
+    const products = [];
+    
+    // Convert layers to downloadable products
+    Object.entries(layers).forEach(([category, items]) => {
+      if (Array.isArray(items)) {
+        items.forEach(item => {
+          products.push({
+            category,
+            name: item,
+            displayName: item.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+            downloadUrl: `${API_BASE_URL}/scenes/${sceneId}/export/${category}/${item}?format=geotiff`
+          });
+        });
+      }
+    });
+    
+    return products;
+  } catch (error) {
+    console.error('Error getting available products:', error);
+    return [];
+  }
 }
 
 /**
@@ -419,10 +536,3 @@ export async function getProspectivityAreas(sceneId, threshold = 0.7) {
     });
   }
 }
-
-/**
- * Get gold prospectivity areas as GeoJSON
-
-export async function getProspectivityAreas(sceneId, threshold = 0.7) {
-  return fetchAPI(`/scenes/${sceneId}/prospectivity-areas?threshold=${threshold}`);
-} */

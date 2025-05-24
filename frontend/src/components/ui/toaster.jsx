@@ -10,14 +10,24 @@ const ToastContext = React.createContext({
 
 export const useToast = () => React.useContext(ToastContext);
 
-// Simple toast implementation
+// Simple toast implementation with unique ID generation
 export const Toaster = () => {
   const [toasts, setToasts] = useState([]);
+  const [toastCounter, setToastCounter] = useState(0);
 
-  // Function to add a toast
+  // Function to add a toast with guaranteed unique ID
   const addToast = ({ title, description, variant = 'default', duration = 5000 }) => {
-    const id = Date.now().toString();
-    setToasts(prev => [...prev, { id, title, description, variant, duration }]);
+    const id = `toast_${Date.now()}_${toastCounter}`;
+    setToastCounter(prev => prev + 1);
+    
+    const newToast = { id, title, description, variant, duration };
+    setToasts(prev => [...prev, newToast]);
+    
+    // Auto-remove toast after duration
+    setTimeout(() => {
+      removeToast(id);
+    }, duration);
+    
     return id;
   };
 
@@ -26,7 +36,7 @@ export const Toaster = () => {
     setToasts(prev => prev.filter(toast => toast.id !== id));
   };
 
-  // Expose the toast function via context
+  // Expose the toast function via context and global window
   useEffect(() => {
     window.toast = addToast;
   }, []);

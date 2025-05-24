@@ -34,6 +34,44 @@ const MapViewController = ({ center, zoom, bounds }) => {
   return null;
 };
 
+// Enhanced ImageOverlay component with error handling
+const SafeImageOverlay = ({ url, bounds, opacity, layerName, onError }) => {
+  const [hasError, setHasError] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    setHasError(false);
+    setIsLoading(true);
+    
+    // Test if the image URL is accessible
+    const img = new Image();
+    img.onload = () => {
+      setIsLoading(false);
+      setHasError(false);
+    };
+    img.onerror = () => {
+      setIsLoading(false);
+      setHasError(true);
+      if (onError) {
+        onError(layerName);
+      }
+    };
+    img.src = url;
+  }, [url, layerName, onError]);
+
+  if (hasError || isLoading) {
+    return null; // Don't render the overlay if there's an error or still loading
+  }
+
+  return (
+    <ImageOverlay
+      bounds={bounds}
+      url={url}
+      opacity={opacity}
+    />
+  );
+};
+
 const ASTERMap = ({
   sceneId,
   selectedLayers = {},
@@ -43,9 +81,10 @@ const ASTERMap = ({
   onMapClick,
 }) => {
   const [prospectivityData, setProspectivityData] = useState(null);
-  const [defaultCenter] = useState([9.1, -2.3]); // Default center (can be improved with better default logic)
+  const [defaultCenter] = useState([9.1, -2.3]); // Default center
   const [defaultZoom] = useState(10);
   const [isLoadingProspectivity, setIsLoadingProspectivity] = useState(false);
+  const [layerErrors, setLayerErrors] = useState(new Set());
   
   // Fetch prospectivity data when needed
   const fetchProspectivityData = useCallback(async () => {
@@ -133,15 +172,49 @@ const ASTERMap = ({
     }
   };
 
-  // Handle layer error
-  const handleLayerError = (layerType, layerName) => {
-    console.error(`Failed to load layer: ${layerType}/${layerName}`);
-    toast({
-      title: "Layer Load Error",
-      description: `Failed to load the ${layerName} ${layerType} layer.`,
-      variant: "destructive"
-    });
-  };
+  // Handle layer error - improved error tracking with rate limiting
+  const handleLayerError = useCallback((layerType, layerName) => {
+    const layerKey = `${layerType}/${layerName}`;
+    
+    if (!layerErrors.has(layerKey)) {
+      setLayerErrors(prev => new Set([...prev, layerKey]));
+      
+      console.error(`Failed to load layer: ${layerKey}`);
+      
+      // Only show toast for the first error per layer and throttle messages
+      const now = Date.now();
+      const lastErrorTime = window._lastLayerErrorTime || 0;
+      
+      // Only show error toast if it's been more than 3 seconds since last error
+      if (now - lastErrorTime > 3000) {
+        toast({
+          title: "Layer Unavailable",
+          description: `The ${layerName.replace(/_/g, ' ')} ${layerType} layer is not available for this scene.`,
+          variant: "warning"
+        });
+        window._lastLayerErrorTime = now;
+      }
+    }
+  }, [layerErrors]);
+
+  // Helper function to check if a layer should be rendered
+  const shouldRenderLayer = useCallback((layerType, layerName) => {
+    if (!sceneId || !imageBounds) return false;
+    
+    const layerKey = `${layerType}/${layerName}`;
+    return !layerErrors.has(layerKey);
+  }, [sceneId, imageBounds, layerErrors]);
+
+  // Helper function to get layer URL with error handling
+  const getSafeLayerUrl = useCallback((layerType, layerName) => {
+    try {
+      return getLayerUrl(sceneId, layerType, layerName);
+    } catch (error) {
+      console.error(`Error getting URL for layer ${layerType}/${layerName}:`, error);
+      handleLayerError(layerType, layerName);
+      return null;
+    }
+  }, [sceneId, handleLayerError]);
   
   return (
     <MapContainer 
@@ -194,72 +267,93 @@ const ASTERMap = ({
         {/* Dynamic Layers Based on Selection */}
         {sceneId && imageBounds && (
           <>
-            {/* Alteration Layer */}
-            {selectedLayers.alteration && (
-              <LayersControl.Overlay checked name={`Alteration: ${selectedLayers.alteration}`}>
-                <ImageOverlay
+            {/* Mineral Layer */}
+            {selectedLayers.mineral && shouldRenderLayer('mineral', selectedLayers.mineral) && (
+              <LayersControl.Overlay checked name={`Mineral: ${selectedLayers.mineral}`}>
+                <SafeImageOverlay
                   bounds={imageBounds}
-                  url={getLayerUrl(sceneId, 'alteration', selectedLayers.alteration)}
+                  url={getSafeLayerUrl('mineral', selectedLayers.mineral)}
                   opacity={0.7}
-                  eventHandlers={{
-                    error: () => handleLayerError('alteration', selectedLayers.alteration)
-                  }}
+                  layerName={selectedLayers.mineral}
+                  onError={() => handleLayerError('mineral', selectedLayers.mineral)}
+                />
+              </LayersControl.Overlay>
+            )}
+            
+            {/* Alteration Layer */}
+            {selectedLayers.alteration && shouldRenderLayer('alteration', selectedLayers.alteration) && (
+              <LayersControl.Overlay checked name={`Alteration: ${selectedLayers.alteration}`}>
+                <SafeImageOverlay
+                  bounds={imageBounds}
+                  url={getSafeLayerUrl('alteration', selectedLayers.alteration)}
+                  opacity={0.7}
+                  layerName={selectedLayers.alteration}
+                  onError={() => handleLayerError('alteration', selectedLayers.alteration)}
                 />
               </LayersControl.Overlay>
             )}
             
             {/* Geological Layer */}
-            {selectedLayers.geological && (
+            {selectedLayers.geological && shouldRenderLayer('geological', selectedLayers.geological) && (
               <LayersControl.Overlay checked name={`Geological: ${selectedLayers.geological}`}>
-                <ImageOverlay
+                <SafeImageOverlay
                   bounds={imageBounds}
-                  url={getLayerUrl(sceneId, 'geological', selectedLayers.geological)}
+                  url={getSafeLayerUrl('geological', selectedLayers.geological)}
                   opacity={0.7}
-                  eventHandlers={{
-                    error: () => handleLayerError('geological', selectedLayers.geological)
-                  }}
+                  layerName={selectedLayers.geological}
+                  onError={() => handleLayerError('geological', selectedLayers.geological)}
                 />
               </LayersControl.Overlay>
             )}
             
             {/* Band Combination Layer */}
-            {selectedLayers.band && (
+            {selectedLayers.band && shouldRenderLayer('band', selectedLayers.band) && (
               <LayersControl.Overlay checked name={`Band Combination: ${selectedLayers.band}`}>
-                <ImageOverlay
+                <SafeImageOverlay
                   bounds={imageBounds}
-                  url={getLayerUrl(sceneId, 'band', selectedLayers.band)}
+                  url={getSafeLayerUrl('band', selectedLayers.band)}
                   opacity={0.7}
-                  eventHandlers={{
-                    error: () => handleLayerError('band', selectedLayers.band)
-                  }}
+                  layerName={selectedLayers.band}
+                  onError={() => handleLayerError('band', selectedLayers.band)}
                 />
               </LayersControl.Overlay>
             )}
             
             {/* Band Ratio Layer */}
-            {selectedLayers.ratio && (
+            {selectedLayers.ratio && shouldRenderLayer('ratio', selectedLayers.ratio) && (
               <LayersControl.Overlay checked name={`Band Ratio: ${selectedLayers.ratio}`}>
-                <ImageOverlay
+                <SafeImageOverlay
                   bounds={imageBounds}
-                  url={getLayerUrl(sceneId, 'ratio', selectedLayers.ratio)}
+                  url={getSafeLayerUrl('ratio', selectedLayers.ratio)}
                   opacity={0.7}
-                  eventHandlers={{
-                    error: () => handleLayerError('ratio', selectedLayers.ratio)
-                  }}
+                  layerName={selectedLayers.ratio}
+                  onError={() => handleLayerError('ratio', selectedLayers.ratio)}
                 />
               </LayersControl.Overlay>
             )}
             
             {/* Gold Pathfinder Layer */}
-            {selectedLayers.gold && (
+            {selectedLayers.gold && shouldRenderLayer('gold', selectedLayers.gold) && (
               <LayersControl.Overlay checked name={`Gold Pathfinder: ${selectedLayers.gold}`}>
-                <ImageOverlay
+                <SafeImageOverlay
                   bounds={imageBounds}
-                  url={getLayerUrl(sceneId, 'gold', selectedLayers.gold)}
+                  url={getSafeLayerUrl('gold', selectedLayers.gold)}
                   opacity={0.7}
-                  eventHandlers={{
-                    error: () => handleLayerError('gold', selectedLayers.gold)
-                  }}
+                  layerName={selectedLayers.gold}
+                  onError={() => handleLayerError('gold', selectedLayers.gold)}
+                />
+              </LayersControl.Overlay>
+            )}
+
+            {/* VNIR Layer for VNIR-only mode */}
+            {selectedLayers.vnir && shouldRenderLayer('vnir', selectedLayers.vnir) && (
+              <LayersControl.Overlay checked name={`VNIR: ${selectedLayers.vnir}`}>
+                <SafeImageOverlay
+                  bounds={imageBounds}
+                  url={getSafeLayerUrl('vnir', selectedLayers.vnir)}
+                  opacity={0.7}
+                  layerName={selectedLayers.vnir}
+                  onError={() => handleLayerError('vnir', selectedLayers.vnir)}
                 />
               </LayersControl.Overlay>
             )}
@@ -308,6 +402,27 @@ const ASTERMap = ({
           <div className="flex items-center space-x-2">
             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-red-600"></div>
             <span className="text-sm font-medium">Loading prospectivity data...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Error indicator for failed layers */}
+      {layerErrors.size > 0 && (
+        <div className="absolute top-4 right-4 bg-yellow-50 border border-yellow-200 rounded-md p-3 z-50 max-w-sm">
+          <div className="flex items-start">
+            <div className="flex-shrink-0">
+              <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+            </div>
+            <div className="ml-3">
+              <h3 className="text-sm font-medium text-yellow-800">
+                Some layers failed to load
+              </h3>
+              <div className="mt-2 text-sm text-yellow-700">
+                <p>{layerErrors.size} layer(s) are not available for this scene.</p>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -493,7 +493,7 @@ def get_processing_status(scene_id):
 
 def get_scene_layers(scene_id):
     """
-    Get available layers for a scene.
+    Get available layers for a scene with better validation and filtering.
 
     Parameters:
     -----------
@@ -503,7 +503,7 @@ def get_scene_layers(scene_id):
     Returns:
     --------
     dict
-        Available layers categorized by type
+        Available layers categorized by type, only including layers that actually exist
     """
     processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
     if not processed_dir.exists() or not processed_dir.is_dir():
@@ -511,8 +511,20 @@ def get_scene_layers(scene_id):
     
     status = get_processing_status(scene_id)
     if status.get("status") != ProcessingStatus.COMPLETED.value:
-        logger.warning(f"Scene {scene_id} processing not completed")
+        logger.warning(f"Scene {scene_id} processing not completed, available layers may be limited")
     
+    # Check metadata to determine processing mode
+    metadata_path = processed_dir / "metadata.json"
+    processing_mode = "Full"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+                processing_mode = metadata.get("processing_mode", "Full")
+        except Exception as e:
+            logger.error(f"Error reading metadata for {scene_id}: {str(e)}")
+    
+    # Define directory mappings
     mineral_dir = processed_dir / "minerals"
     alteration_dir = processed_dir / "alteration"
     gold_dir = processed_dir / "gold_pathfinders"
@@ -525,34 +537,167 @@ def get_scene_layers(scene_id):
         "gold": [],
         "band": [],
         "ratio": [],
-        "geological": []
+        "geological": [],
+        "vnir": []  # Add VNIR category for VNIR-only mode
     }
     
+    # Helper function to validate and add layers
+    def add_layer_if_exists(layer_list, layer_name, file_path):
+        if file_path.exists() and file_path.is_file():
+            layer_list.append(layer_name)
+            logger.debug(f"Added layer: {layer_name} -> {file_path}")
+            return True
+        else:
+            logger.debug(f"Skipped missing layer: {layer_name} -> {file_path}")
+            return False
+    
+    # Check mineral layers with validation
     if mineral_dir.exists():
         mineral_files = list(mineral_dir.glob("*_map.tif"))
-        layers["mineral"] = [file.stem.split("_")[0] for file in mineral_files]
+        for file in mineral_files:
+            layer_name = file.stem.replace("_map", "")
+            add_layer_if_exists(layers["mineral"], layer_name, file)
+        
+        logger.info(f"Found mineral layers: {layers['mineral']}")
+        
+        # For VNIR-only mode, also check for VNIR-specific products
+        if processing_mode == "VNIR-only":
+            vnir_products = {
+                "ndvi": "ndvi_map.tif",
+                "band1": "band1_blue_map.tif", 
+                "band2": "band2_green_map.tif",
+                "band3": "band3_nir_map.tif"
+            }
+            
+            for simple_name, file_name in vnir_products.items():
+                vnir_file = mineral_dir / file_name
+                add_layer_if_exists(layers["vnir"], simple_name, vnir_file)
+            
+            logger.info(f"Found VNIR layers: {layers['vnir']}")
     
-    if alteration_dir.exists():
+    # Check alteration layers (not available in VNIR-only mode)
+    if alteration_dir.exists() and processing_mode != "VNIR-only":
         alteration_files = list(alteration_dir.glob("*_map.tif"))
-        layers["alteration"] = [file.stem.split("_")[0] for file in alteration_files]
+        for file in alteration_files:
+            layer_name = file.stem.replace("_map", "")
+            add_layer_if_exists(layers["alteration"], layer_name, file)
+        
+        logger.info(f"Found alteration layers: {layers['alteration']}")
     
+    # Check gold pathfinder layers with validation
     if gold_dir.exists():
         gold_files = list(gold_dir.glob("*_map.tif"))
-        layers["gold"] = [file.stem.split("_")[0] for file in gold_files]
+        available_gold = []
+        
+        for file in gold_files:
+            layer_name = file.stem.replace("_map", "")
+            if add_layer_if_exists(available_gold, layer_name, file):
+                pass  # Layer was added by add_layer_if_exists
+        
+        # In VNIR-only mode, only show VNIR-compatible pathfinders that actually exist
+        if processing_mode == "VNIR-only":
+            vnir_compatible_gold = ["pyrite", "arsenopyrite"]  # These use VNIR bands
+            layers["gold"] = [g for g in available_gold if g in vnir_compatible_gold]
+        else:
+            layers["gold"] = available_gold
+        
+        logger.info(f"Found gold pathfinder layers: {layers['gold']}")
     
+    # Check band combination layers with validation
     if rgb_dir.exists():
         band_files = list(rgb_dir.glob("*_composite.tif"))
-        layers["band"] = [file.stem.split("_")[0] for file in band_files]
+        for file in band_files:
+            layer_name = file.stem.replace("_composite", "")
+            add_layer_if_exists(layers["band"], layer_name, file)
+        
+        logger.info(f"Found band combination layers: {layers['band']}")
     
+    # Check ratio layers with validation
     if analysis_dir.exists():
         ratio_files = list(analysis_dir.glob("*_ratio.tif"))
-        layers["ratio"] = [file.stem.split("_")[0] for file in ratio_files]
+        for file in ratio_files:
+            layer_name = file.stem.replace("_ratio", "")
+            add_layer_if_exists(layers["ratio"], layer_name, file)
+        
+        logger.info(f"Found ratio layers: {layers['ratio']}")
     
+    # Check geological layers with validation
     if analysis_dir.exists():
         geological_files = list(analysis_dir.glob("*_features.tif"))
-        layers["geological"] = [file.stem.split("_")[0] for file in geological_files]
+        for file in geological_files:
+            layer_name = file.stem.replace("_features", "")
+            add_layer_if_exists(layers["geological"], layer_name, file)
+        
+        logger.info(f"Found geological layers: {layers['geological']}")
     
+    # Add processing mode info to response
+    layers["_metadata"] = {
+        "processing_mode": processing_mode,
+        "vnir_only": processing_mode == "VNIR-only",
+        "total_layers": sum(len(layer_list) for key, layer_list in layers.items() if key != "_metadata")
+    }
+    
+    logger.info(f"Returning {layers['_metadata']['total_layers']} validated layers for scene {scene_id}")
     return layers
+
+def validate_layer_exists(scene_id, layer_type, layer_name):
+    """
+    Validate that a specific layer exists for a scene.
+    
+    Parameters:
+    -----------
+    scene_id : str
+        Scene ID
+    layer_type : str
+        Type of layer
+    layer_name : str
+        Name of layer
+        
+    Returns:
+    --------
+    bool
+        True if layer exists, False otherwise
+    """
+    try:
+        processed_dir = Path(Config.DATA_DIR) / "processed" / scene_id
+        
+        # Map layer types to directory and file patterns
+        type_mapping = {
+            "mineral": ("minerals", "_map.tif"),
+            "alteration": ("alteration", "_map.tif"),
+            "geological": ("analysis", "_features.tif"),
+            "band": ("rgb_composites", "_composite.tif"),
+            "ratio": ("analysis", "_ratio.tif"),
+            "gold": ("gold_pathfinders", "_map.tif"),
+            "vnir": ("minerals", "_map.tif")
+        }
+        
+        if layer_type not in type_mapping:
+            return False
+        
+        dir_name, file_suffix = type_mapping[layer_type]
+        
+        # Special handling for VNIR layers
+        if layer_type == "vnir":
+            vnir_mapping = {
+                'ndvi': 'ndvi',
+                'band1': 'band1_blue',
+                'band2': 'band2_green',
+                'band3': 'band3_nir'
+            }
+            layer_name = vnir_mapping.get(layer_name, layer_name)
+        
+        layer_dir = processed_dir / dir_name
+        layer_file = layer_dir / f"{layer_name}{file_suffix}"
+        
+        exists = layer_file.exists()
+        logger.info(f"Layer validation for {scene_id}/{layer_type}/{layer_name}: {exists} (path: {layer_file})")
+        return exists
+        
+    except Exception as e:
+        logger.error(f"Error validating layer {scene_id}/{layer_type}/{layer_name}: {str(e)}")
+        return False
+        
 
 def _create_placeholder_tiff(filepath):
     """

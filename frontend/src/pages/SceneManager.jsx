@@ -1,6 +1,6 @@
 // src/pages/SceneManager.jsx
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Card,
   Button,
@@ -28,13 +28,15 @@ import {
   AlertCircle,
   Clock,
   Trash2,
-  Download
+  Download,
+  Eye
 } from 'lucide-react';
-import { getScenes, getProcessingStatus, uploadAsterData } from '../services/api';
+import { getScenes, getProcessingStatus, uploadAsterData, downloadSceneProducts, getAvailableProducts } from '../services/api';
 import { ProcessingStatus } from '../enums';
 import { toast } from '../components/ui';
 
 const SceneManager = () => {
+  const navigate = useNavigate();
   const [scenes, setScenes] = useState([]);
   const [filteredScenes, setFilteredScenes] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -55,194 +57,286 @@ const SceneManager = () => {
   }, [scenes, searchQuery, statusFilter, dateFilter, activeTab]);
 
   const fetchScenes = async () => {
-  setIsLoading(true);
-  try {
-    console.log("Fetching scenes...");
-    const data = await getScenes();
-    console.log("Received scenes:", data);
-    
-    if (!data || data.length === 0) {
-      console.log("No scenes found or empty response");
+    setIsLoading(true);
+    try {
+      console.log("Fetching scenes...");
+      const data = await getScenes();
+      console.log("Received scenes:", data);
+      
+      if (!data || data.length === 0) {
+        console.log("No scenes found or empty response");
+        setScenes([]);
+        setFilteredScenes([]);
+        setIsLoading(false);
+        return;
+      }
+      
+      // Fetch processing status for each scene
+      const scenesWithStatus = await Promise.all(
+        data.map(async (scene) => {
+          try {
+            const status = await getProcessingStatus(scene.id);
+            return {
+              ...scene,
+              status: status.status,
+              progress: status.progress,
+              stage: status.stage
+            };
+          } catch (error) {
+            console.error(`Error fetching status for scene ${scene.id}:`, error);
+            return {
+              ...scene,
+              status: ProcessingStatus.IDLE,
+              progress: 0,
+              stage: null
+            };
+          }
+        })
+      );
+      
+      console.log("Scenes with status:", scenesWithStatus);
+      setScenes(scenesWithStatus);
+      
+      // Trigger filtering immediately
+      filterScenes(scenesWithStatus);
+    } catch (error) {
+      console.error("Failed to load scenes:", error);
+      toast({
+        title: "Error Loading Scenes",
+        description: error.message || "Failed to load scenes.",
+        variant: "destructive"
+      });
+      
+      // Clear scenes on error
       setScenes([]);
       setFilteredScenes([]);
+    } finally {
       setIsLoading(false);
-      return;
     }
-    
-    // Fetch processing status for each scene
-    const scenesWithStatus = await Promise.all(
-      data.map(async (scene) => {
-        try {
-          const status = await getProcessingStatus(scene.id);
-          return {
-            ...scene,
-            status: status.status,
-            progress: status.progress,
-            stage: status.stage
-          };
-        } catch (error) {
-          console.error(`Error fetching status for scene ${scene.id}:`, error);
-          return {
-            ...scene,
-            status: ProcessingStatus.IDLE,
-            progress: 0,
-            stage: null
-          };
-        }
-      })
-    );
-    
-    console.log("Scenes with status:", scenesWithStatus);
-    setScenes(scenesWithStatus);
-    
-    // Trigger filtering immediately
-    filterScenes(scenesWithStatus);
-  } catch (error) {
-    console.error("Failed to load scenes:", error);
-    toast({
-      title: "Error Loading Scenes",
-      description: error.message || "Failed to load scenes.",
-      variant: "destructive"
-    });
-    
-    // Clear scenes on error
-    setScenes([]);
-    setFilteredScenes([]);
-  } finally {
-    setIsLoading(false);
-  }
-};
+  };
 
-
-// Updated filterScenes function that accepts scenes as parameter
-const filterScenes = (scenesToFilter = scenes) => {
-  let filtered = [...scenesToFilter];
-  
-  // Filter by search query
-  if (searchQuery) {
-    filtered = filtered.filter(scene => 
-      (scene.name && scene.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      (scene.id && scene.id.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
-  }
-  
-  // Filter by status
-  if (statusFilter !== 'all') {
-    filtered = filtered.filter(scene => scene.status === statusFilter);
-  }
-  
-  // Filter by active tab
-  if (activeTab !== 'all') {
-    if (activeTab === 'completed') {
-      filtered = filtered.filter(scene => scene.status === ProcessingStatus.COMPLETED);
-    } else if (activeTab === 'processing') {
-      filtered = filtered.filter(scene => scene.status === ProcessingStatus.PROCESSING);
-    } else if (activeTab === 'pending') {
+  // Updated filterScenes function that accepts scenes as parameter
+  const filterScenes = (scenesToFilter = scenes) => {
+    let filtered = [...scenesToFilter];
+    
+    // Filter by search query
+    if (searchQuery) {
       filtered = filtered.filter(scene => 
-        scene.status === ProcessingStatus.IDLE || scene.status === ProcessingStatus.QUEUED
+        (scene.name && scene.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (scene.id && scene.id.toLowerCase().includes(searchQuery.toLowerCase()))
       );
     }
-  }
-  
-  // Filter by date (only if date is valid)
-  if (dateFilter !== 'all') {
-    const now = new Date();
-    let dateLimit = new Date();
     
-    if (dateFilter === 'today') {
-      dateLimit.setDate(now.getDate() - 1);
-    } else if (dateFilter === 'week') {
-      dateLimit.setDate(now.getDate() - 7);
-    } else if (dateFilter === 'month') {
-      dateLimit.setMonth(now.getMonth() - 1);
-    } else if (dateFilter === 'year') {
-      dateLimit.setFullYear(now.getFullYear() - 1);
+    // Filter by status
+    if (statusFilter !== 'all') {
+      filtered = filtered.filter(scene => scene.status === statusFilter);
     }
     
-    filtered = filtered.filter(scene => {
-      // Only filter if scene has a valid date
-      if (!scene.date || scene.date === 'Unknown') return true;
-      
-      try {
-        const sceneDate = new Date(scene.date);
-        return !isNaN(sceneDate) && sceneDate >= dateLimit;
-      } catch (e) {
-        console.error("Invalid date format:", scene.date);
-        return true; // Include scenes with invalid dates
+    // Filter by active tab
+    if (activeTab !== 'all') {
+      if (activeTab === 'completed') {
+        filtered = filtered.filter(scene => scene.status === ProcessingStatus.COMPLETED);
+      } else if (activeTab === 'processing') {
+        filtered = filtered.filter(scene => scene.status === ProcessingStatus.PROCESSING);
+      } else if (activeTab === 'pending') {
+        filtered = filtered.filter(scene => 
+          scene.status === ProcessingStatus.IDLE || scene.status === ProcessingStatus.QUEUED
+        );
       }
-    });
-  }
-  
-  console.log("Filtered scenes:", filtered);
-  setFilteredScenes(filtered);
-};
+    }
+    
+    // Filter by date (only if date is valid)
+    if (dateFilter !== 'all') {
+      const now = new Date();
+      let dateLimit = new Date();
+      
+      if (dateFilter === 'today') {
+        dateLimit.setDate(now.getDate() - 1);
+      } else if (dateFilter === 'week') {
+        dateLimit.setDate(now.getDate() - 7);
+      } else if (dateFilter === 'month') {
+        dateLimit.setMonth(now.getMonth() - 1);
+      } else if (dateFilter === 'year') {
+        dateLimit.setFullYear(now.getFullYear() - 1);
+      }
+      
+      filtered = filtered.filter(scene => {
+        // Only filter if scene has a valid date
+        if (!scene.date || scene.date === 'Unknown') return true;
+        
+        try {
+          const sceneDate = new Date(scene.date);
+          return !isNaN(sceneDate) && sceneDate >= dateLimit;
+        } catch (e) {
+          console.error("Invalid date format:", scene.date);
+          return true; // Include scenes with invalid dates
+        }
+      });
+    }
+    
+    console.log("Filtered scenes:", filtered);
+    setFilteredScenes(filtered);
+  };
+
   const handleFileChange = (e) => {
     if (e.target.files && e.target.files[0]) {
       setSelectedFile(e.target.files[0]);
     }
   };
 
-const handleUpload = async () => {
-  if (!selectedFile) {
-    toast({
-      title: "No File Selected",
-      description: "Please select an ASTER data file to upload.",
-      variant: "destructive"
-    });
-    return;
-  }
-  
-  setIsUploading(true);
-  setUploadProgress(0);
-  
-  try {
-    // Get the returned object with promise and progressTracker
-    const upload = await uploadAsterData(selectedFile);
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      toast({
+        title: "No File Selected",
+        description: "Please select an ASTER data file to upload.",
+        variant: "destructive"
+      });
+      return;
+    }
     
-    // Set up the progress tracking function
-    upload.progressTracker.onUploadProgress = (progress) => {
-      setUploadProgress(progress);
-    };
+    setIsUploading(true);
+    setUploadProgress(0);
     
-    // Wait for the actual upload to complete
-    const result = await upload.promise;
-    
-    // Ensure the progress bar shows 100%
-    setUploadProgress(100);
-    
-    toast({
-      title: "Upload Complete",
-      description: result.processingStarted 
-        ? "ASTER data has been uploaded and processing has started automatically."
-        : "ASTER data has been uploaded successfully. You can now start processing.",
-      variant: "success"
-    });
-    
-    // Add a delay to allow backend to set up the scene directories
-    setTimeout(() => {
-      // Refresh scenes list to show the new scene
-      fetchScenes();
+    try {
+      // Get the returned object with promise and progressTracker
+      const upload = await uploadAsterData(selectedFile);
       
-      // Reset file selection
-      setSelectedFile(null);
+      // Set up the progress tracking function
+      upload.progressTracker.onUploadProgress = (progress) => {
+        setUploadProgress(progress);
+      };
       
-      // If processing was started automatically, switch to Processing tab
-      if (result.processingStarted) {
-        setActiveTab('processing');
+      // Wait for the actual upload to complete
+      const result = await upload.promise;
+      
+      // Ensure the progress bar shows 100%
+      setUploadProgress(100);
+      
+      toast({
+        title: "Upload Complete",
+        description: result.processingStarted 
+          ? "ASTER data has been uploaded and processing has started automatically."
+          : "ASTER data has been uploaded successfully. You can now start processing.",
+        variant: "success"
+      });
+      
+      // Add a delay to allow backend to set up the scene directories
+      setTimeout(() => {
+        // Refresh scenes list to show the new scene
+        fetchScenes();
+        
+        // Reset file selection
+        setSelectedFile(null);
+        
+        // If processing was started automatically, switch to Processing tab
+        if (result.processingStarted) {
+          setActiveTab('processing');
+        }
+      }, 1500);
+      
+    } catch (error) {
+      toast({
+        title: "Upload Failed",
+        description: error.message || "An unknown error occurred during upload.",
+        variant: "destructive"
+      });
+      console.error("Upload error:", error);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // Handle viewing a scene in the Explorer
+  const handleViewScene = (sceneId) => {
+    navigate(`/explorer?scene=${sceneId}`);
+  };
+
+  // Handle downloading scene products
+  const handleDownloadScene = async (scene) => {
+    try {
+      // Show initial loading message
+      toast({
+        title: "Preparing Download",
+        description: "Gathering available products for download...",
+      });
+
+      // Get available products first
+      const products = await getAvailableProducts(scene.id);
+      
+      if (products.length === 0) {
+        toast({
+          title: "No Products Available",
+          description: "No processed products found for this scene. Make sure the scene has been processed successfully.",
+          variant: "warning"
+        });
+        return;
       }
-    }, 1500);
-    
-  } catch (error) {
-    toast({
-      title: "Upload Failed",
-      description: error.message || "An unknown error occurred during upload.",
-      variant: "destructive"
-    });
-    console.error("Upload error:", error);
-  } finally {
-    setIsUploading(false);
-  }
-};
+
+      // Download the products bundle
+      const result = await downloadSceneProducts(scene.id);
+      
+      if (result.success) {
+        toast({
+          title: "Download Started",
+          description: result.message,
+          variant: "success"
+        });
+      } else {
+        throw new Error(result.message || "Download failed");
+      }
+      
+    } catch (error) {
+      console.error("Download error:", error);
+      
+      // Fallback: try to download at least one representative product
+      try {
+        // Try to download a general alteration composite as fallback
+        const fallbackUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'}/scenes/${scene.id}/export/band/general_alteration?format=geotiff`;
+        
+        const link = document.createElement('a');
+        link.href = fallbackUrl;
+        link.download = `${scene.id}_general_alteration.tif`;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        toast({
+          title: "Fallback Download",
+          description: "Started download of available products. Some products may not be available.",
+          variant: "warning"
+        });
+      } catch (fallbackError) {
+        toast({
+          title: "Download Failed",
+          description: "Unable to download scene products. Please ensure the scene has been processed and try again.",
+          variant: "destructive"
+        });
+      }
+    }
+  };
+
+  // Handle deleting a scene
+  const handleDeleteScene = async (scene) => {
+    if (!window.confirm(`Are you sure you want to delete scene ${scene.name || scene.id}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      // TODO: Implement actual delete functionality in the API
+      toast({
+        title: "Delete Scene",
+        description: "Scene deletion is not yet implemented.",
+        variant: "warning"
+      });
+    } catch (error) {
+      toast({
+        title: "Delete Failed",
+        description: error.message || "Failed to delete scene.",
+        variant: "destructive"
+      });
+    }
+  };
 
   const renderStatusIcon = (status) => {
     switch (status) {
@@ -275,6 +369,22 @@ const handleUpload = async () => {
         return 'bg-red-100 text-red-700';
       default:
         return 'bg-gray-100 text-gray-700';
+    }
+  };
+
+  const formatDate = (dateString) => {
+    if (!dateString || dateString === 'Unknown') {
+      return 'Unknown';
+    }
+    
+    try {
+      const date = new Date(dateString);
+      if (isNaN(date)) {
+        return 'Invalid Date';
+      }
+      return date.toLocaleDateString();
+    } catch (error) {
+      return 'Invalid Date';
     }
   };
 
@@ -504,7 +614,7 @@ const handleUpload = async () => {
                 {filteredScenes.map((scene) => (
                   <tr key={scene.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">{scene.name}</div>
+                      <div className="text-sm font-medium text-gray-900">{scene.name || scene.id}</div>
                       <div className="text-xs text-gray-500">{scene.id}</div>
                       {scene.processingMode === 'VNIR-only' && (
                         <span className="inline-flex items-center px-2 py-0.5 mt-1 rounded text-xs font-medium bg-blue-100 text-blue-800">
@@ -513,14 +623,10 @@ const handleUpload = async () => {
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">{scene.name}</div>
-                      <div className="text-xs text-gray-500">{scene.id}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
                         <Calendar className="h-4 w-4 text-gray-400 mr-1" />
                         <span className="text-sm text-gray-500">
-                          {new Date(scene.date).toLocaleDateString()}
+                          {formatDate(scene.date)}
                         </span>
                       </div>
                     </td>
@@ -540,7 +646,10 @@ const handleUpload = async () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {scene.status === ProcessingStatus.PROCESSING && (
-                        <Progress value={scene.progress || 0} />
+                        <div className="flex items-center">
+                          <Progress value={scene.progress || 0} className="w-16 mr-2" />
+                          <span className="text-xs text-gray-500">{scene.progress || 0}%</span>
+                        </div>
                       )}
                       {scene.status === ProcessingStatus.COMPLETED && (
                         <div className="flex items-center text-green-600">
@@ -563,15 +672,30 @@ const handleUpload = async () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <div className="flex justify-end space-x-2">
-                        <Link to={`/explorer?scene=${scene.id}`}>
-                          <Button size="sm" variant="outline">
-                            View
-                          </Button>
-                        </Link>
-                        <Button size="sm" variant="outline">
+                        <Button 
+                          size="sm" 
+                          variant="outline"
+                          onClick={() => handleViewScene(scene.id)}
+                          title="View scene in Explorer"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          variant="outline"
+                          onClick={() => handleDownloadScene(scene)}
+                          disabled={scene.status !== ProcessingStatus.COMPLETED}
+                          title="Download scene products"
+                        >
                           <Download className="h-4 w-4" />
                         </Button>
-                        <Button size="sm" variant="outline" className="text-red-600 hover:text-red-800">
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          className="text-red-600 hover:text-red-800"
+                          onClick={() => handleDeleteScene(scene)}
+                          title="Delete scene"
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
